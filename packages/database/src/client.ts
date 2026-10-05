@@ -8,9 +8,19 @@ export interface CreatePrismaClientOptions {
   applicationName?: string;
 }
 
-/** One client (one pool) per process. Never create clients per request. */
+/**
+ * One client (one pool) per process. Never create clients per request.
+ * The `?schema=` URL parameter (used by the Prisma CLI) is not understood by `pg`, so it is
+ * stripped from the connection string and passed to the adapter explicitly.
+ */
 export function createPrismaClient({ connectionString, maxConnections = 10, applicationName = 'hubmine' }: CreatePrismaClientOptions) {
-  const adapter = new PrismaPg({ connectionString, max: maxConnections, application_name: applicationName });
+  const url = new URL(connectionString);
+  const schema = url.searchParams.get('schema') ?? undefined;
+  url.searchParams.delete('schema');
+  const adapter = new PrismaPg(
+    { connectionString: url.toString(), max: maxConnections, application_name: applicationName },
+    schema ? { schema } : undefined,
+  );
   return new PrismaClient({ adapter });
 }
 

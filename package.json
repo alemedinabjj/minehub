@@ -3,11 +3,19 @@
   "private": true,
   "packageManager": "pnpm@11.7.0",
   "scripts": {
-    "dev": "pnpm --filter @hubmine/web dev",
+    "setup": "./scripts/dev-env.sh && pnpm install && pnpm build:packages && pnpm infra:up && pnpm db:migrate",
+    "infra:up": "docker compose up -d --wait",
+    "infra:down": "docker compose down",
+    "db:migrate": "pnpm --filter @hubmine/database exec prisma migrate deploy",
+    "db:migrate:dev": "pnpm --filter @hubmine/database exec prisma migrate dev",
+    "db:studio": "pnpm --filter @hubmine/database exec prisma studio",
+    "build:packages": "pnpm --filter \"./packages/**\" -r build",
     "build": "pnpm -r build",
+    "dev": "pnpm build:packages && pnpm -r --parallel --filter \"./packages/**\" --filter @hubmine/api --filter @hubmine/worker --filter @hubmine/web dev",
     "lint": "pnpm -r lint",
-    "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test",
+    "typecheck": "pnpm build:packages && pnpm -r typecheck",
+    "test": "pnpm build:packages && pnpm -r test",
+    "test:integration": "pnpm --filter @hubmine/api test:integration",
     "test:e2e": "pnpm --filter @hubmine/web test:e2e"
   }
 }
