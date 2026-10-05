@@ -1,0 +1,52 @@
+name: Docker contract
+
+# Security regression suite against a real Docker daemon (apps/worker docker-spec).
+# Slow (pulls itzg/minecraft-server and boots a real server), so it runs nightly and
+# only on changes that can affect container isolation.
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "apps/worker/src/docker/**"
+      - "apps/worker/src/minecraft/**"
+      - ".github/workflows/docker-contract.yml"
+  pull_request:
+    paths:
+      - "apps/worker/src/docker/**"
+      - "apps/worker/src/minecraft/**"
+      - ".github/workflows/docker-contract.yml"
+
+concurrency:
+  group: docker-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    name: DockerodeRuntime against a real daemon
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      # Same daemon hardening as scripts/setup-wsl-docker.sh; the suite requires userns-remap.
+      - name: Harden Docker daemon
+        run: |
+          echo '{"userns-remap":"default","icc":false,"log-driver":"local","log-opts":{"max-size":"10m","max-file":"3"},"no-new-privileges":true}' \
+            | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          docker info --format '{{.SecurityOptions}}' | grep -q userns
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:packages
+      - run: pnpm --filter @hubmine/worker test:docker
+        env:
+          HUBMINE_DOCKER_TESTS: "1"

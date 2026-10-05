@@ -1,5 +1,7 @@
 # HubMine
 
+[![CI](https://github.com/alemedinabjj/minehub/actions/workflows/ci.yml/badge.svg)](https://github.com/alemedinabjj/minehub/actions/workflows/ci.yml)
+
 Plataforma para criar e gerenciar servidores de Minecraft sem precisar entender de infraestrutura. Você escolhe a versão, o tipo de servidor (Vanilla, Paper, Fabric, Forge, NeoForge…) ou um modpack, e o HubMine sobe um container isolado, entrega o endereço para os amigos entrarem e oferece um painel com console, jogadores, métricas e configurações.
 
 ## Funcionalidades
