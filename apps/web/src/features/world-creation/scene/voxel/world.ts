@@ -204,7 +204,9 @@ function cottage(b: Builder, x0: number, z0: number, w: number, d: number, walls
 }
 
 function lampPost(b: Builder, x: number, z: number) {
-  const y = (b.highest(x, z) ?? 0) + 1;
+  const c = b.col(x, z);
+  if (!c || c.fluid || b.get(x, c.h + 1, z)) return;
+  const y = c.h + 1;
   b.box(`post:${x},${z}`, [x + 0.42, y, z + 0.42], [x + 0.58, y + 1.3, z + 0.58], "METAL");
   b.box(`lantern:${x},${z}`, [x + 0.3, y + 1.3, z + 0.3], [x + 0.7, y + 1.8, z + 0.7], "LANTERN");
 }
@@ -227,7 +229,8 @@ function pool(b: Builder, cx: number, cz: number, r: number, fluid: BlockId, rim
 // ---------- biomes ----------
 
 const SPOTS = {
-  trees: [[-4, 2], [4, -3], [-2, -6], [5, 1], [1, 5], [-5, -1], [3, -6], [-6, 3], [-1, 6], [6, -2]] as Array<[number, number]>,
+  /** Mostly on the far side of the default camera (+x, +z) so the plaza stays visible. */
+  trees: [[-5, 3], [4, -5], [-1, -6], [-6, -2], [6, -3], [-3, 6]] as Array<[number, number]>,
 };
 
 const forest: Theme = {
@@ -306,14 +309,14 @@ const skyland: Theme = {
   extraRadius: 3,
   terraform: ({ b }) => {
     for (const c of b.cols.values()) {
-      if (c.x >= -6 && c.x <= -1 && c.z >= 1 && c.z <= 5) {
+      if (c.x >= -7 && c.x <= -2 && c.z >= 1 && c.z <= 5) {
         c.h = 1;
         c.reserved = true;
       }
     }
   },
   decorate: ({ b, spec, R, count }) => {
-    cottage(b, -5, 1, 4, 4, "PLANKS");
+    cottage(b, -6, 1, 4, 4, "PLANKS");
     // Rainbow tower: grows with progress
     const tower = b.col(3, -3);
     if (tower) {

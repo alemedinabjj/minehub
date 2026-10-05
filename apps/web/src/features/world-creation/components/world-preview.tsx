@@ -7,25 +7,43 @@ import { useState } from "react";
 import { durations, easings, transitions } from "@/lib/motion";
 import type { SceneDescriptor } from "../scene/derive-scene";
 import { Scene2D } from "../scene/scene-2d";
-import { useCanRender3D } from "../scene/use-can-render-3d";
+import { useRenderTier } from "../scene/use-can-render-3d";
 
-// three / R3F / drei live only in this lazily loaded chunk.
+// three / R3F live only in this lazily loaded chunk.
 const Scene3D = dynamic(() => import("../scene/scene-3d"), { ssr: false, loading: () => null });
 
 /**
- * Persistent world preview. The 2D scene is always rendered first (instant, cheap);
- * on capable desktops the 3D scene fades in over it once loaded.
+ * Persistent world preview. The 2D scene renders first (instant, cheap, SSR-safe);
+ * when WebGL is usable the voxel world fades in over it and the 2D layer is
+ * unmounted. Tiers: full (desktop), lite (mobile/modest: renders on change only),
+ * static (reduced motion), none (2D only).
  */
 export function WorldPreview({ scene, compact = false }: { scene: SceneDescriptor; compact?: boolean }) {
-  const can3D = useCanRender3D() && !compact;
+  const tier = useRenderTier();
+  const [failed3D, setFailed3D] = useState(false);
   const [ready3D, setReady3D] = useState(false);
+  const [covered, setCovered] = useState(false);
+  const use3D = tier !== "none" && !compact && !failed3D;
 
   return (
     <div className="relative h-full w-full overflow-hidden">
-      <Scene2D scene={scene} />
-      {can3D ? (
-        <div aria-hidden className="absolute inset-0 transition-opacity duration-700" style={{ opacity: ready3D ? 1 : 0 }}>
-          <Scene3D scene={scene} onReady={() => setReady3D(true)} />
+      {!(use3D && covered) ? <Scene2D scene={scene} /> : null}
+      {use3D ? (
+        <div
+          aria-hidden
+          className="absolute inset-0 transition-opacity duration-700"
+          style={{ opacity: ready3D ? 1 : 0 }}
+          onTransitionEnd={(e) => e.target === e.currentTarget && setCovered(ready3D)}
+        >
+          <Scene3D
+            scene={scene}
+            tier={tier}
+            onReady={() => setReady3D(true)}
+            onFail={() => {
+              setFailed3D(true);
+              setCovered(false);
+            }}
+          />
         </div>
       ) : null}
       <Nameplate name={scene.nameplate} compact={compact} born={scene.phase === "born"} />
@@ -37,7 +55,7 @@ export function WorldPreview({ scene, compact = false }: { scene: SceneDescripto
 
 function Nameplate({ name, compact, born }: { name: string | null; compact: boolean; born: boolean }) {
   return (
-    <div aria-hidden className={`pointer-events-none absolute inset-x-0 flex justify-center ${compact ? "top-3" : "top-[12%]"}`}>
+    <div aria-hidden className={`pointer-events-none absolute inset-x-0 flex justify-center ${compact ? "top-3" : "top-[8%]"}`}>
       <AnimatePresence mode="wait">
         {name ? (
           <m.div
