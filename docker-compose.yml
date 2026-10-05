@@ -1,0 +1,55 @@
+# Local development infrastructure for HubMine (control plane dependencies).
+# API, worker and web run on the host with `pnpm dev`; Minecraft containers are created
+# by the worker through the Docker Engine API, never by this file.
+# Ports bind to 127.0.0.1 only: nothing here is reachable from the network.
+name: hubmine
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hubmine
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run scripts/dev-env.sh first}
+      POSTGRES_DB: hubmine
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hubmine -d hubmine"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    # BullMQ requires noeviction; AOF keeps queued jobs across restarts.
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?run scripts/dev-env.sh first}
+      - --maxmemory-policy
+      - noeviction
+      - --appendonly
+      - "yes"
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  postgres-data:
+  redis-data:

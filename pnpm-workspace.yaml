@@ -5,5 +5,8 @@ packages:
 allowBuilds:
   sharp: true
   unrs-resolver: true
-  msw: true
   esbuild: true
+  '@prisma/engines': true
+  prisma: true
+  argon2: true
+  '@swc/core': true

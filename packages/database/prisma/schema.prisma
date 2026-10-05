@@ -1,0 +1,300 @@
+// HubMine control-plane schema. Conventions: .claude/skills/prisma-postgres-engineering
+// Hand-written SQL (partial unique indexes, CHECK constraints) lives in the migrations
+// and is listed next to each model. Never "fix" drift by dropping those objects.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum ServerStatus {
+  CREATING
+  STARTING
+  ONLINE
+  STOPPING
+  STOPPED
+  SUSPENDED
+  CRASHED
+  ERROR
+  DELETING
+  DELETED
+}
+
+enum ServerSoftware {
+  VANILLA
+  PAPER
+  PURPUR
+  FABRIC
+  FORGE
+  NEOFORGE
+}
+
+enum WorldType {
+  SURVIVAL
+  PVP
+  CREATIVE
+  MODDED
+  SMP
+  HARDCORE
+}
+
+enum PlayerBucket {
+  SOLO
+  SMALL
+  MEDIUM
+  LARGE
+  HUGE
+}
+
+enum ServerJobType {
+  CREATE
+  START
+  STOP
+  RESTART
+  SUSPEND
+  RESUME
+  DELETE
+}
+
+enum ServerJobStatus {
+  PENDING
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum NodeStatus {
+  ONLINE
+  DRAINING
+  OFFLINE
+  ERROR
+}
+
+enum ServerRole {
+  OWNER
+  ADMIN
+  MANAGER
+  MODERATOR
+  VIEWER
+}
+
+enum ActorType {
+  USER
+  SYSTEM
+  ADMIN
+}
+
+model User {
+  id           String    @id @default(uuid(7)) @db.Uuid
+  /// Stored lowercase; stays reserved after soft delete until purge/anonymization.
+  email        String    @unique @db.VarChar(254)
+  name         String    @db.VarChar(64)
+  passwordHash String    @map("password_hash")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deletedAt    DateTime? @map("deleted_at") @db.Timestamptz(3)
+
+  refreshTokens RefreshToken[]
+  ownedServers  Server[]       @relation("ServerOwner")
+  memberships   ServerMember[]
+
+  @@map("users")
+}
+
+/// Rotating refresh tokens. Only a SHA-256 hash is stored. A token presented after it was
+/// rotated ("reuse") revokes its whole family: the session was likely stolen.
+model RefreshToken {
+  id           String    @id @default(uuid(7)) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  familyId     String    @map("family_id") @db.Uuid
+  tokenHash    String    @unique @map("token_hash") @db.Char(64)
+  expiresAt    DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt    DateTime? @map("revoked_at") @db.Timestamptz(3)
+  replacedById String?   @map("replaced_by_id") @db.Uuid
+  userAgent    String?   @map("user_agent") @db.VarChar(256)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  @@map("refresh_tokens")
+}
+
+/// A machine that runs Minecraft containers (data plane). MVP: a single "local" node.
+model ServerNode {
+  id              String     @id @default(uuid(7)) @db.Uuid
+  name            String     @unique @db.VarChar(32)
+  status          NodeStatus @default(ONLINE)
+  /// Host players connect to (IP or DNS name).
+  publicHost      String     @map("public_host") @db.VarChar(253)
+  region          String     @default("local") @db.VarChar(32)
+  dockerEndpoint  String     @map("docker_endpoint") @db.VarChar(255)
+  totalCpuMillis  Int        @map("total_cpu_millis")
+  totalMemoryMb   Int        @map("total_memory_mb")
+  totalStorageMb  Int        @map("total_storage_mb")
+  /// Latest heartbeat snapshot (free memory/disk, container count). Sanitized numbers only.
+  lastHeartbeat   Json?      @map("last_heartbeat")
+  lastHeartbeatAt DateTime?  @map("last_heartbeat_at") @db.Timestamptz(3)
+  createdAt       DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  servers Server[]
+
+  @@map("server_nodes")
+}
+
+/// Partial unique: (owner_id, slug) and (node_id, port) WHERE deleted_at IS NULL.
+/// CHECK: heap_mb / cpu_millis / port ranges equal RESOURCE_LIMITS in @hubmine/shared.
+model Server {
+  id               String         @id @default(uuid(7)) @db.Uuid
+  ownerId          String         @map("owner_id") @db.Uuid
+  name             String         @db.VarChar(32)
+  slug             String         @db.VarChar(40)
+  status           ServerStatus   @default(CREATING)
+  /// Sanitized machine-readable reason: CRASH, OOM, IDLE, PROVISIONING_FAILED...
+  statusReason     String?        @map("status_reason") @db.VarChar(64)
+  statusChangedAt  DateTime       @default(now()) @map("status_changed_at") @db.Timestamptz(3)
+  worldType        WorldType      @map("world_type")
+  minecraftVersion String         @map("minecraft_version") @db.VarChar(32)
+  software         ServerSoftware
+  loaderVersion    String?        @map("loader_version") @db.VarChar(32)
+  /// MODPACK only: { source, projectId, versionId }, schema-validated before write.
+  modpackRef       Json?          @map("modpack_ref")
+  players          PlayerBucket
+  /// JVM heap. Container memory limit = heap + overhead (memoryOverheadMb).
+  heapMb           Int            @map("heap_mb")
+  cpuMillis        Int            @map("cpu_millis")
+  storageLimitMb   Int            @default(10240) @map("storage_limit_mb")
+  nodeId           String?        @map("node_id") @db.Uuid
+  containerId      String?        @unique @map("container_id") @db.VarChar(64)
+  port             Int?
+  /// Future: <slug>.<domain> via SRV/proxy. Null until DNS exists.
+  hostname         String?        @db.VarChar(253)
+  eulaAcceptedAt   DateTime       @map("eula_accepted_at") @db.Timestamptz(3)
+  crashCount       Int            @default(0) @map("crash_count")
+  lastSeenAt       DateTime?      @map("last_seen_at") @db.Timestamptz(3)
+  lastStartedAt    DateTime?      @map("last_started_at") @db.Timestamptz(3)
+  lastStoppedAt    DateTime?      @map("last_stopped_at") @db.Timestamptz(3)
+  /// Optimistic lock counter, bumped on every status transition.
+  version          Int            @default(0)
+  createdAt        DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deletedAt        DateTime?      @map("deleted_at") @db.Timestamptz(3)
+
+  owner         User                 @relation("ServerOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  node          ServerNode?          @relation(fields: [nodeId], references: [id], onDelete: Restrict)
+  configuration ServerConfiguration?
+  members       ServerMember[]
+  jobs          ServerJob[]
+  events        ServerEvent[]
+
+  @@index([ownerId, createdAt])
+  @@index([nodeId])
+  @@index([status])
+  @@map("servers")
+}
+
+model ServerConfiguration {
+  serverId        String   @id @map("server_id") @db.Uuid
+  /// Allowlisted server.properties subset (worldSettingsSchema), validated before write.
+  properties      Json
+  /// AES-256-GCM: version(1) | iv(12) | tag(16) | ciphertext. Never selected for API responses.
+  rconPasswordEnc Bytes    @map("rcon_password_enc")
+  revision        Int      @default(1)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@map("server_configurations")
+}
+
+/// Access control. The owner also has an OWNER membership; authorization always goes
+/// through memberships so sharing works without special cases.
+model ServerMember {
+  serverId  String     @map("server_id") @db.Uuid
+  userId    String     @map("user_id") @db.Uuid
+  role      ServerRole
+  createdAt DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([serverId, userId])
+  @@index([userId])
+  @@map("server_members")
+}
+
+/// An operation. id == BullMQ jobId.
+/// Partial unique: one active (PENDING/QUEUED/RUNNING) operation per server.
+model ServerJob {
+  id             String          @id @default(uuid(7)) @db.Uuid
+  serverId       String          @map("server_id") @db.Uuid
+  type           ServerJobType
+  status         ServerJobStatus @default(PENDING)
+  /// Latest observable milestone (e.g. PROVISION_IMAGE_READY). Not a percentage.
+  stage          String?         @db.VarChar(64)
+  requestedById  String?         @map("requested_by_id") @db.Uuid
+  idempotencyKey String?         @map("idempotency_key") @db.VarChar(64)
+  attempts       Int             @default(0)
+  /// Sanitized, user-safe.
+  errorCode      String?         @map("error_code") @db.VarChar(64)
+  errorMessage   String?         @map("error_message") @db.VarChar(500)
+  correlationId  String?         @map("correlation_id") @db.VarChar(64)
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  startedAt      DateTime?       @map("started_at") @db.Timestamptz(3)
+  finishedAt     DateTime?       @map("finished_at") @db.Timestamptz(3)
+  updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@unique([requestedById, idempotencyKey])
+  @@index([serverId, createdAt])
+  @@index([status, createdAt])
+  @@map("server_jobs")
+}
+
+/// Append-only server timeline (status changes, provisioning milestones, crashes).
+model ServerEvent {
+  id          String        @id @default(uuid(7)) @db.Uuid
+  serverId    String        @map("server_id") @db.Uuid
+  type        String        @db.VarChar(64)
+  fromStatus  ServerStatus? @map("from_status")
+  toStatus    ServerStatus? @map("to_status")
+  actorType   ActorType     @map("actor_type")
+  actorId     String?       @map("actor_id") @db.Uuid
+  operationId String?       @map("operation_id") @db.Uuid
+  message     String?       @db.VarChar(500)
+  metadata    Json?
+  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@index([serverId, id])
+  @@map("server_events")
+}
+
+/// Security/audit trail across the platform. Append-only; never contains secrets.
+model AuditLog {
+  id         String    @id @default(uuid(7)) @db.Uuid
+  actorType  ActorType @map("actor_type")
+  actorId    String?   @map("actor_id") @db.Uuid
+  action     String    @db.VarChar(64)
+  targetType String    @map("target_type") @db.VarChar(32)
+  targetId   String?   @map("target_id") @db.Uuid
+  serverId   String?   @map("server_id") @db.Uuid
+  metadata   Json?
+  ip         String?   @db.VarChar(45)
+  requestId  String?   @map("request_id") @db.VarChar(64)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([serverId, createdAt])
+  @@index([actorId, createdAt])
+  @@map("audit_logs")
+}

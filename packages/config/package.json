@@ -1,5 +1,5 @@
 {
-  "name": "@hubmine/shared",
+  "name": "@hubmine/config",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -9,22 +9,22 @@
       "default": "./dist/index.js"
     }
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "dev": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/node": "^24.19.1",
-    "typescript": "^5.9.3",
+    "typescript": "~5.9.3",
     "vitest": "^5.0.3"
-  },
-  "files": [
-    "dist"
-  ]
+  }
 }
