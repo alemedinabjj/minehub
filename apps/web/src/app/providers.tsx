@@ -3,6 +3,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { LazyMotion, MotionConfig, domMax } from "motion/react";
 import { useState } from "react";
+import { SessionBootstrap } from "@/features/auth/components/session-bootstrap";
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(
@@ -13,6 +14,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
   );
   return (
     <QueryClientProvider client={queryClient}>
+      <SessionBootstrap />
       {/* reducedMotion="user": transform/layout animations are dropped for users who ask for less motion */}
       <MotionConfig reducedMotion="user">
         <LazyMotion features={domMax} strict>

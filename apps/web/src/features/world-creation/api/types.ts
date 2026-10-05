@@ -32,20 +32,4 @@ export interface WorldCreationApi {
   listEvents(serverId: string, afterEventId: string | null, signal?: AbortSignal): Promise<ServerEvent[]>;
 }
 
-/** Normalized API failure. `code` comes from the backend error envelope, or a client-side code. */
-export class ApiRequestError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-    readonly status: number | null,
-    readonly requestId?: string,
-  ) {
-    super(message);
-    this.name = "ApiRequestError";
-  }
-
-  /** Network/5xx failures are worth retrying with the same idempotency key. */
-  get retryable(): boolean {
-    return this.status === null || this.status >= 500 || this.status === 429;
-  }
-}
+export { ApiRequestError } from "@/lib/api/http";

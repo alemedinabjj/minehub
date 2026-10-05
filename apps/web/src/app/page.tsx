@@ -13,6 +13,12 @@ export default function Home() {
       >
         Criar servidor
       </Link>
+      <p className="text-sm text-muted">
+        Já tem conta?{" "}
+        <Link href="/login" className="font-medium text-accent hover:underline">
+          Entrar
+        </Link>
+      </p>
     </main>
   );
 }
