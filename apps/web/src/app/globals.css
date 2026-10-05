@@ -1,0 +1,105 @@
+@import "tailwindcss";
+
+/*
+ * HubMine design tokens (see .claude/skills/minecraft-ui-design).
+ * Dark-first; semantic names only. Components never use raw hex.
+ */
+:root {
+  --background: #0f1115;
+  --surface: #171a21;
+  --surface-raised: #1f232c;
+  --border: #2a2f3a;
+  --foreground: #e8eaef;
+  --muted: #9aa3b2;
+  --primary: #4caf50;
+  --primary-foreground: #0b1a0c;
+  --accent: #3fd0d4;
+  --success: #3ccf6e;
+  --warning: #e5b33b;
+  --danger: #e0483e;
+  --info: #6c8cff;
+
+  /* Scene palette (decorative, never behind body text without an overlay) */
+  --sky-top: #1b2a4a;
+  --sky-bottom: #3d5a80;
+  --ground: #3b5d2a;
+  --ground-dark: #2c4720;
+  --dirt: #6b4a2f;
+  --stone: #5d6470;
+  --sand: #c9b47a;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --shadow-raised: 0 1px 0 rgb(255 255 255 / 0.04) inset, 0 8px 24px rgb(0 0 0 / 0.35);
+  --shadow-overlay: 0 24px 64px rgb(0 0 0 / 0.55);
+
+  --z-scene: 0;
+  --z-panel: 10;
+  --z-nav: 20;
+  --z-toast: 50;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-border: var(--border);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-accent: var(--accent);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --shadow-raised: var(--shadow-raised);
+  --shadow-overlay: var(--shadow-overlay);
+  --font-sans: var(--font-sans-face);
+  --font-mono: var(--font-mono-face);
+  --font-display: var(--font-display-face);
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans-face), ui-sans-serif, system-ui, sans-serif;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.pixelated {
+  image-rendering: pixelated;
+}
+
+/* Decorative ambient loops. Off for reduced motion. */
+@keyframes hm-float {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  50% { transform: translate3d(0, -6px, 0); }
+}
+@keyframes hm-drift {
+  0% { transform: translate3d(0, 0, 0); opacity: 0; }
+  15% { opacity: 0.9; }
+  100% { transform: translate3d(var(--drift-x, 12px), -120px, 0); opacity: 0; }
+}
+@keyframes hm-pulse-glow {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+.hm-float { animation: hm-float 4s ease-in-out infinite; }
+.hm-particle { animation: hm-drift var(--dur, 6s) linear infinite; animation-delay: var(--delay, 0s); }
+.hm-glow { animation: hm-pulse-glow 2.4s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .hm-float, .hm-particle, .hm-glow { animation: none; }
+  .hm-particle { opacity: 0; }
+}
