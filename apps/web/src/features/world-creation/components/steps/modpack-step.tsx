@@ -19,8 +19,8 @@ const CATEGORY_LABEL: Record<ModpackCategory, string> = {
   new: "Novos",
   technology: "Tecnologia",
   adventure: "Aventura",
-  rpg: "RPG",
-  exploration: "Exploração",
+  magic: "Magia",
+  quests: "Missões",
   optimization: "Performance",
 };
 

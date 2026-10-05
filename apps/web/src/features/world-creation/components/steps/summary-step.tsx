@@ -103,7 +103,19 @@ export function SummaryStep({ onEdit, showErrors }: { onEdit: (step: StepId) => 
             checked={settings.whitelist}
             onChange={(whitelist) => updateSettings({ whitelist })}
           />
+          <SwitchField
+            label="Aceitar contas não originais"
+            description="Libera quem joga pelo TLauncher ou outro launcher sem conta Microsoft"
+            checked={!settings.onlineMode}
+            onChange={(allow) => updateSettings({ onlineMode: !allow })}
+          />
         </div>
+        {!settings.onlineMode ? (
+          <p role="note" className="rounded-md border border-warning/40 bg-warning/10 p-3 text-sm text-foreground">
+            Sem a verificação da Microsoft, qualquer pessoa pode entrar usando qualquer nome, inclusive o seu. Só compartilhe o endereço com quem
+            você conhece e não dê poderes de operador por nome. A whitelist ajuda, mas não impede alguém de usar o nome de um jogador autorizado.
+          </p>
+        ) : null}
       </section>
 
       <section>
@@ -130,12 +142,6 @@ export function SummaryStep({ onEdit, showErrors }: { onEdit: (step: StepId) => 
               onChange={(simulationDistance) => updateSettings({ simulationDistance })}
             />
             <SwitchField label="Hardcore" description="Morreu, acabou" checked={settings.hardcore} onChange={(hardcore) => updateSettings({ hardcore, ...(hardcore ? { difficulty: "hard" } : {}) })} />
-            <SwitchField
-              label="Modo online"
-              description="Exige contas originais do Minecraft"
-              checked={settings.onlineMode}
-              onChange={(onlineMode) => updateSettings({ onlineMode })}
-            />
             <NumberField
               label="Memória (MB)"
               value={heap}

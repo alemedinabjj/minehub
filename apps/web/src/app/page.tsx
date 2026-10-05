@@ -1,8 +1,10 @@
 import Link from "next/link";
+import { SignedInRedirect } from "@/features/auth/components/signed-in-redirect";
 
 export default function Home() {
   return (
     <main className="flex min-h-dvh flex-col items-center justify-center gap-6 px-6 text-center">
+      <SignedInRedirect />
       <p className="font-display text-5xl text-foreground">
         Hub<span className="text-primary">Mine</span>
       </p>

@@ -33,11 +33,11 @@ const VERSIONS: VersionEntry[] = [
 ];
 
 const MODPACK_NAMES: Array<[string, string, ModpackSummary["categories"], number]> = [
-  ["Expedição Celeste", "Ilhas flutuantes, dirigíveis e exploração no céu.", ["adventure", "exploration", "popular"], 140],
+  ["Expedição Celeste", "Ilhas flutuantes, dirigíveis e exploração no céu.", ["adventure", "magic", "popular"], 140],
   ["Engenharia Profunda", "Máquinas, automação e energia em escala industrial.", ["technology", "popular"], 210],
-  ["Crônicas do Reino", "Classes, masmorras e chefes com progressão de RPG.", ["rpg", "adventure"], 95],
+  ["Crônicas do Reino", "Classes, masmorras e chefes com progressão de RPG.", ["quests", "adventure"], 95],
   ["Sobrevivência Leve", "Melhorias de qualidade de vida sem mudar a essência.", ["optimization", "new"], 38],
-  ["Fronteira Selvagem", "Biomas novos, animais e mundo mais vivo.", ["exploration", "new"], 72],
+  ["Fronteira Selvagem", "Biomas novos, animais e mundo mais vivo.", ["magic", "new"], 72],
 ];
 
 interface MockServer {

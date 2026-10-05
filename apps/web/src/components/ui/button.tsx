@@ -1,6 +1,6 @@
 import { forwardRef } from "react";
 
-type Variant = "primary" | "secondary" | "ghost";
+type Variant = "primary" | "secondary" | "ghost" | "destructive";
 type Size = "md" | "lg";
 
 const VARIANTS: Record<Variant, string> = {
@@ -8,6 +8,8 @@ const VARIANTS: Record<Variant, string> = {
     "bg-primary text-primary-foreground hover:brightness-110 active:brightness-95 shadow-[0_2px_0_0_rgb(0_0_0/0.35)] active:translate-y-px",
   secondary: "bg-surface-raised text-foreground border border-border hover:border-muted",
   ghost: "text-muted hover:text-foreground hover:bg-surface-raised",
+  // Dark text on redstone: white would be ~3.9:1, below AA.
+  destructive: "bg-danger text-background hover:brightness-110 active:brightness-95",
 };
 
 const SIZES: Record<Size, string> = {
