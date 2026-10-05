@@ -1,5 +1,5 @@
-import { clampToStep, RESOURCE_LIMITS, type PlayerBucket } from '../domain/resources';
-import { isModLoader, type Software } from '../domain/software';
+import { clampToStep, RESOURCE_LIMITS, type PlayerBucket } from '../domain/resources.js';
+import { isModLoader, type Software } from '../domain/software.js';
 
 export interface RecommendResourcesInput {
   software: Software;

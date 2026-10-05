@@ -223,7 +223,8 @@ export class MockWorldCreationApi implements WorldCreationApi {
     };
 
     if (elapsed > 600) entry.operation = { ...entry.operation, status: "RUNNING" };
-    if (isCreate && elapsed > 1500) emit("PROVISION_PORT_ALLOCATED", null);
+    if (isCreate && elapsed > 900) emit("PROVISION_NODE_SELECTED", null);
+    if (isCreate && elapsed > 1500) emit("PROVISION_STORAGE_READY", null);
     if (isCreate && elapsed > 3000) emit("PROVISION_IMAGE_READY", null);
 
     if (shouldFail && elapsed > 4200) {
@@ -240,15 +241,15 @@ export class MockWorldCreationApi implements WorldCreationApi {
 
     if (elapsed > 4200) emit("PROVISION_CONTAINER_CREATED", null);
     if (elapsed > 5000) {
-      emit("PROVISION_FIRST_START", "STARTING");
+      emit("PROVISION_CONTAINER_STARTED", "STARTING");
       server.summary = { ...server.summary, status: "STARTING" };
     }
     if (elapsed > readyAt) {
-      emit("STATUS_CHANGED", "RUNNING");
+      emit("STATUS_CHANGED", "ONLINE");
       entry.operation = { ...entry.operation, status: "SUCCEEDED", finishedAt: new Date().toISOString() };
       server.summary = {
         ...server.summary,
-        status: "RUNNING",
+        status: "ONLINE",
         address: { host: "localhost", port: 25565 + this.servers.size },
       };
     }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { formatServerAddress } from '../contracts/server';
-import { slugifyWorldName, validateWorldName } from './world';
+import { formatServerAddress } from '../contracts/server.js';
+import { slugifyWorldName, validateWorldName } from './world.js';
 
 describe('validateWorldName', () => {
   it.each([

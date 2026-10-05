@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { Experience } from './software';
+import type { Experience } from './software.js';
 
 export const WORLD_TYPES = ['SURVIVAL', 'PVP', 'CREATIVE', 'MODDED', 'SMP', 'HARDCORE'] as const;
 export type WorldType = (typeof WORLD_TYPES)[number];

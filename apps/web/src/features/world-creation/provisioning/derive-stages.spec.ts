@@ -18,7 +18,7 @@ const server = (status: ServerSummary["status"]): ServerSummary => ({
   statusReason: null,
   minecraftVersion: "26.1",
   software: "PAPER",
-  address: status === "RUNNING" ? { host: "localhost", port: 25566 } : null,
+  address: status === "ONLINE" ? { host: "localhost", port: 25566 } : null,
 });
 const ev = (type: string): ServerEvent => ({ id: crypto.randomUUID(), type, toStatus: null, createdAt: "2026-10-04T00:00:01.000Z", message: null });
 const states = (v: ReturnType<typeof deriveProvisioningView>) => Object.fromEntries(v.stages.map((s) => [s.id, s.state]));
@@ -34,19 +34,19 @@ describe("deriveProvisioningView", () => {
     const v = deriveProvisioningView({
       server: server("CREATING"),
       operation: op("RUNNING"),
-      events: [ev("PROVISION_PORT_ALLOCATED"), ev("PROVISION_IMAGE_READY")],
+      events: [ev("PROVISION_STORAGE_READY"), ev("PROVISION_IMAGE_READY")],
     });
     expect(states(v)).toMatchObject({ RESERVING: "done", PREPARING: "done", DOWNLOADING: "done", BUILDING: "current", STARTING: "pending" });
   });
 
-  it("STARTING completes only when the server is RUNNING", () => {
+  it("STARTING completes only when the server is ONLINE", () => {
     const starting = deriveProvisioningView({
       server: server("STARTING"),
       operation: op("RUNNING"),
-      events: [ev("PROVISION_PORT_ALLOCATED"), ev("PROVISION_IMAGE_READY"), ev("PROVISION_CONTAINER_CREATED")],
+      events: [ev("PROVISION_STORAGE_READY"), ev("PROVISION_IMAGE_READY"), ev("PROVISION_CONTAINER_CREATED")],
     });
     expect(starting.current).toBe("STARTING");
-    const ready = deriveProvisioningView({ server: server("RUNNING"), operation: op("SUCCEEDED"), events: [] });
+    const ready = deriveProvisioningView({ server: server("ONLINE"), operation: op("SUCCEEDED"), events: [] });
     expect(ready.phase).toBe("ready");
     expect(ready.stages.every((s) => s.state === "done")).toBe(true);
   });
@@ -55,7 +55,7 @@ describe("deriveProvisioningView", () => {
     const v = deriveProvisioningView({
       server: server("ERROR"),
       operation: op("FAILED", { code: "CONTAINER_CREATE_FAILED", message: "x" }),
-      events: [ev("PROVISION_PORT_ALLOCATED"), ev("PROVISION_IMAGE_READY")],
+      events: [ev("PROVISION_STORAGE_READY"), ev("PROVISION_IMAGE_READY")],
     });
     expect(v.phase).toBe("failed");
     expect(states(v).BUILDING).toBe("failed");

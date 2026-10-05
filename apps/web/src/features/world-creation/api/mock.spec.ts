@@ -40,12 +40,12 @@ describe("MockWorldCreationApi (demo backend contract)", () => {
     expect(b.operation.id).toBe(a.operation.id);
   });
 
-  it("reaches RUNNING with an address", async () => {
+  it("reaches ONLINE with an address", async () => {
     const api = new MockWorldCreationApi();
     const { server } = await settle(api.createServer(request("Mundo"), "key-abcdefgh"));
     await vi.advanceTimersByTimeAsync(10_000);
     const s = await settle(api.getServer(server.id));
-    expect(s.status).toBe("RUNNING");
+    expect(s.status).toBe("ONLINE");
     expect(s.address?.host).toBe("localhost");
   });
 

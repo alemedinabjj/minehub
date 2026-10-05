@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { PLAYER_BUCKETS, RESOURCE_LIMITS } from '../domain/resources';
-import { SOFTWARE } from '../domain/software';
-import { recommendResources } from './recommend-resources';
+import { PLAYER_BUCKETS, RESOURCE_LIMITS } from '../domain/resources.js';
+import { SOFTWARE } from '../domain/software.js';
+import { recommendResources } from './recommend-resources.js';
 
 describe('recommendResources', () => {
   it('recommends 2 GB for a solo vanilla world', () => {

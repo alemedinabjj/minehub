@@ -23,15 +23,15 @@ export interface ProvisioningSnapshot {
 }
 
 const STAGE_EVIDENCE: Record<Exclude<ProvisioningStage, "RESERVING" | "ONLINE">, string> = {
-  PREPARING: "PROVISION_PORT_ALLOCATED",
+  PREPARING: "PROVISION_STORAGE_READY",
   DOWNLOADING: "PROVISION_IMAGE_READY",
   BUILDING: "PROVISION_CONTAINER_CREATED",
-  STARTING: "__RUNNING__", // completed only by status RUNNING
+  STARTING: "__ONLINE__", // completed only by status ONLINE (health check passed)
 };
 
 export function deriveProvisioningView({ server, operation, events }: ProvisioningSnapshot): ProvisioningView {
   const seen = new Set(events.map((e) => e.type));
-  const running = server?.status === "RUNNING";
+  const running = server?.status === "ONLINE";
   const failed = operation?.status === "FAILED" || operation?.status === "CANCELLED" || server?.status === "ERROR";
 
   const done = new Set<ProvisioningStage>();

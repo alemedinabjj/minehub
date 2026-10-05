@@ -39,7 +39,7 @@ export function ServerReady({ serverId, justCreated }: { serverId: string; justC
   }
 
   const address = server.address ? formatServerAddress(server.address) : null;
-  const online = server.status === "RUNNING";
+  const online = server.status === "ONLINE";
   const copy = async () => {
     if (!address) return;
     try {

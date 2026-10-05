@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { SOFTWARE } from '../domain/software';
+import { SOFTWARE } from '../domain/software.js';
 
 /**
  * Catalog API contracts. INTEGRATION POINT: these endpoints do not exist yet

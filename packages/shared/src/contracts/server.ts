@@ -1,22 +1,31 @@
 import { z } from 'zod';
-import { RESOURCE_LIMITS, PLAYER_BUCKETS } from '../domain/resources';
-import { SOFTWARE } from '../domain/software';
-import { WORLD_TYPES, worldNameSchema, worldSettingsSchema } from '../domain/world';
-import { modpackRefSchema, versionIdSchema } from './catalog';
+import { RESOURCE_LIMITS, PLAYER_BUCKETS } from '../domain/resources.js';
+import { SOFTWARE } from '../domain/software.js';
+import { WORLD_TYPES, worldNameSchema, worldSettingsSchema } from '../domain/world.js';
+import { modpackRefSchema, versionIdSchema } from './catalog.js';
 
 /**
  * Server API contracts (see nestjs-backend-standards / minecraft-server-orchestration).
  * INTEGRATION POINT: implemented by the backend prompt.
  *
  *   POST /servers                                 (Idempotency-Key header) -> 202 CreateServerAccepted
+ *   GET  /servers                                 -> { data: ServerSummary[], meta: { nextCursor } }
+ *   POST /servers/:id/start|stop|restart          (Idempotency-Key header) -> 202 CreateServerAccepted
+ *   DELETE /servers/:id                           -> 202 CreateServerAccepted
  *   GET  /servers/:id                             -> { data: ServerSummary }
  *   GET  /servers/:id/operations/:operationId     -> { data: Operation }
  *   GET  /servers/:id/events?after=<eventId>      -> { data: ServerEvent[] }
  *   GET  /servers/:id/events/stream               (SSE, future) -> ServerEvent | ServerSummary snapshots
  */
 
+/**
+ * Lifecycle status. Long-running actions (restart, backup, update) are not statuses:
+ * they are operations (ServerJob) shown alongside the status.
+ * CRASHED = the server stopped unexpectedly and auto-recovery may still bring it back;
+ * ERROR = needs user or operator action.
+ */
 export const SERVER_STATUSES = [
-  'CREATING', 'STARTING', 'RUNNING', 'STOPPING', 'STOPPED', 'SUSPENDED', 'ERROR', 'DELETING', 'DELETED',
+  'CREATING', 'STARTING', 'ONLINE', 'STOPPING', 'STOPPED', 'SUSPENDED', 'CRASHED', 'ERROR', 'DELETING', 'DELETED',
 ] as const;
 export type ServerStatus = (typeof SERVER_STATUSES)[number];
 
@@ -82,20 +91,22 @@ export const operationSchema = z.object({
 export type Operation = z.infer<typeof operationSchema>;
 
 /**
- * Provisioning milestones the worker emits as ServerEvents.
- * INTEGRATION POINT: proposed contract — the worker must emit these (backend prompt).
- * Only milestones the worker can actually observe are listed.
+ * Provisioning milestones the worker emits as ServerEvents, in order.
+ * Only milestones the worker can actually observe are listed; "Minecraft ready"
+ * is the server reaching ONLINE (health check passed), not an event.
  */
 export const PROVISIONING_EVENT_TYPES = [
-  'PROVISION_PORT_ALLOCATED',
+  'PROVISION_NODE_SELECTED',
+  'PROVISION_STORAGE_READY',
   'PROVISION_IMAGE_READY',
   'PROVISION_CONTAINER_CREATED',
-  'PROVISION_FIRST_START',
+  'PROVISION_CONTAINER_STARTED',
 ] as const;
+export type ProvisioningEventType = (typeof PROVISIONING_EVENT_TYPES)[number];
 
 export const serverEventSchema = z.object({
   id: z.uuid(),
-  type: z.string().max(48),
+  type: z.string().max(64),
   toStatus: z.enum(SERVER_STATUSES).nullable(),
   createdAt: z.iso.datetime(),
   message: z.string().max(500).nullable(),
