@@ -17,7 +17,7 @@ Related skills:
 
 - Writing or changing the worker's container runtime adapter (create/start/stop/restart/remove/inspect/logs/exec/cleanup).
 - Building or changing a container spec: env, labels, mounts, ports, network, limits, healthcheck.
-- Anything that touches a server's data directory on the host (config editing, backups, deletion).
+- Anything that touches a server's data volume (config editing, backups, deletion).
 - Configuring how the worker reaches the Docker daemon (socket, proxy, TLS, remote node).
 - Writing Dockerfiles or compose files for HubMine's own services (api, worker, web, postgres, redis).
 - Reviewing any PR that contains `dockerode`, `child_process`, `docker`, `HostConfig`, `Mounts` or `PortBindings`.
@@ -30,7 +30,7 @@ The repository is greenfield: there is no Docker adapter yet. Paths and names be
 
 1. **Least privilege by default.** Every relaxation (an added capability, a writable rootfs, an extra mount) needs a code comment explaining why, plus a test.
 2. **No user value reaches Docker verbatim.** Container options are built only from validated, allowlisted, server-derived values.
-3. **Deterministic identity.** Container names, labels and data paths derive from the server's UUID, never from user-chosen names or slugs.
+3. **Deterministic identity.** Container names, labels and volume names derive from the server's UUID, never from user-chosen names or slugs.
 4. **Idempotent operations.** Calling any operation twice gives the same end state without errors or duplicates.
 5. **Only the worker touches Docker.** The API, the web app and Minecraft containers never get daemon access.
 6. **Docker Engine API, not the shell.** Use the API through an SDK, never `docker ...` command strings.
@@ -43,22 +43,19 @@ The repository is greenfield: there is no Docker adapter yet. Paths and names be
 - Never set `Privileged: true` or use `--privileged`.
 - Always set `CapDrop: ['ALL']`. Add nothing back by default, because the container runs as a non-root user and needs no capabilities. Any `CapAdd` must be a named, justified exception.
 - Always set `SecurityOpt: ['no-new-privileges:true']`. Keep Docker's default seccomp and AppArmor profiles. Never use `seccomp=unconfined` or `apparmor=unconfined`.
-- Run as a dedicated non-root user: `User: '<uid>:<gid>'` from config, default `100000:100000`. The UID/GID must be **≥ 100000 and have no account on the host**. Never use 1000, which is usually the first human user, for example your own WSL user. Pre-create the data directory with that ownership. Treat running as root as a bug.
+- Run as a non-root user: `User: '<uid>:<gid>'` from config (`MC_UID`/`MC_GID`, default `1000:1000`, the itzg image's default owner of `/data`). Never `0`/`root`. This default is safe **only because the daemon runs with `userns-remap`**: container UID 1000 maps to an unprivileged subordinate host UID (e.g. 166536), not to the host's first human user. Note the remap range is 65536 IDs, so container UIDs must stay below 65536. Treat running as root as a bug.
 - Never set `PidMode`, `IpcMode`, `UsernsMode` or `UTSMode` to `host`. Never set `Devices`, `DeviceRequests`, `CgroupParent`, `Sysctls` or `ExtraHosts` from user input.
-- Enable `userns-remap` in the daemon, or use rootless Docker, so container UIDs map to unprivileged host UIDs. **This is required before HubMine accepts untrusted (public) users.** The current setup is a personal PC running Docker under WSL for development; without remapping it's acceptable only for trusted users (you and friends). Record this as a launch blocker.
+- `userns-remap` (or rootless Docker) is **required**. `scripts/setup-wsl-docker.sh` enables it with `"userns-remap": "default"`. At startup the worker checks `docker info` (`SecurityOptions` contains `name=userns`) and **refuses to create tenant containers** without it, unless `DOCKER_REQUIRE_USERNS=false` (development only, never production).
 
 ### Filesystem and mounts
 
-- Each server gets **one** writable mount at `/data`, sourced from that server's dedicated directory or volume. Nothing else is writable.
-- Never mount `/`, `/etc`, `/home`, `/var/run/docker.sock`, the HubMine repo, or another server's directory.
+- Each server gets **one** writable mount at `/data`: its own Docker **named volume** `hm-data-<serverId>` (`{ Type: 'volume', Source: volumeName(serverId), Target: '/data' }`). Nothing else is writable. Host **bind mounts are not used** for tenant data.
+  - Why volumes: with `userns-remap` the worker (an unprivileged host user) cannot `chown` host directories to the remapped container UID, and volumes remove the whole class of host-side symlink/path-traversal bugs. Docker creates the volume owned correctly from the image's `/data`.
+  - Volumes carry the labels `com.hubmine.managed=true` and `com.hubmine.server-id=<uuid>`, are created by the worker before the container, and are removed only by an explicit delete step.
+- Never mount `/`, `/etc`, `/home`, `/var/run/docker.sock`, the HubMine repo, any host path, or another server's volume.
 - Target: `ReadonlyRootfs: true` plus a size-limited tmpfs, `Tmpfs: { '/tmp': 'rw,nosuid,nodev,size=256m' }`. Don't add `noexec` to `/tmp`: the JVM and Netty extract native libraries there. Before making read-only the default for a server type, verify that type starts read-only in an integration test. Document any type that needs an exception.
-- Data directory path:
-  - `dataDir = path.join(DATA_ROOT, serverId)`, where `serverId` has been validated as a UUID and `DATA_ROOT` is an absolute path from config.
-  - Assert that `path.relative(DATA_ROOT, dataDir)` doesn't start with `..` and isn't absolute.
-  - Create it with mode `0750` and chown it to the container UID/GID.
-  - Mount `DATA_ROOT` on the host with `nosuid,nodev`, ideally on a dedicated filesystem. Pending decision: bind mounts under `DATA_ROOT` versus named volumes `hm-data-<serverId>`.
-- **Symlink attacks:** untrusted code can create symlinks anywhere inside `/data`, including in parent directories (`plugins -> /etc`, `server.properties -> /etc/shadow`), and can swap files between a check and a use (TOCTOU). `lstat` / `O_NOFOLLOW` protect only the last path component, so they are **not** a sufficient defense. Rule: **no host-side reads or writes inside tenant directories.** File operations go through the container's namespace only: the Docker archive API (`getArchive` / `putArchive`) or `exec`, on a patched Docker daemon (the CVE-2018-15664 class of archive symlink races is fixed in current releases; keep Docker updated). The only host-side operations allowed on a tenant directory are creating it empty (before the container exists) and removing the whole directory (after the container is removed). Never run recursive `chown` or `chmod` on tenant directories.
-- Deleting data is a separate, explicit step that runs only after the container is removed. It must recheck the path, refuse to run if `serverId` is empty or invalid, and never call `rm -rf` through a shell.
+- **Symlink attacks:** untrusted code can create symlinks anywhere inside `/data`, including in parent directories (`plugins -> /etc`, `server.properties -> /etc/shadow`), and can swap files between a check and a use (TOCTOU). `lstat` / `O_NOFOLLOW` protect only the last path component, so they are **not** a sufficient defense. Rule: **no host-side reads or writes inside tenant volumes** (never touch `/var/lib/docker/<remap>/volumes/...` directly). File operations go through the container's namespace only: the Docker archive API (`getArchive` / `putArchive`) or `exec`, on a patched Docker daemon (the CVE-2018-15664 class of archive symlink races is fixed in current releases; keep Docker updated). The only operations on a tenant volume outside the container are creating it (before the container exists) and removing it through the Docker API (after the container is removed).
+- Deleting data is a separate, explicit step that runs only after the container is removed: `removeVolume(volumeName(serverId))` through the API, refusing to run if `serverId` is not a valid UUID. Never `rm -rf` anything.
 
 ### Network
 
@@ -82,7 +79,7 @@ Validate every limit as an integer in a known range **before** converting it. De
 | CPU | `NanoCpus` | `NanoCpus = cpuMillis * 1_000_000`, an integer. Store CPU as integer millicores, never floats. Never take `CpusetCpus` from user input. |
 | PIDs | `PidsLimit` | Always set a positive number (default 1024; JVM threads count as PIDs, and modded servers use many). Never `0`, `-1` or unset. |
 | Files | `Ulimits` | `nofile` soft/hard set explicitly (for example 32768). |
-| Disk | none built in | Bind mounts and local volumes have no native quota. `DATA_ROOT` **must** be a dedicated filesystem, so a full tenant disk can't fill the host's root FS. Before public launch, a hard per-server quota is **required**: XFS project quotas, a ZFS dataset per server, or LVM thin volumes (pending decision). For development on a personal PC: measure usage periodically (with a timeout), record it, and suspend at plan thresholds. |
+| Disk | none built in | The `local` volume driver has no per-volume quota. MVP: measure each volume's usage periodically (Docker `system df -v` / volume usage via the API, with a timeout), record it, warn and suspend at plan thresholds. Before public launch a hard quota is **required**: Docker data root on a dedicated XFS filesystem with project quotas, a ZFS-backed volume driver, or LVM thin volumes (pending decision), so one tenant can't fill the host. |
 | Disk IO | `BlkioWeight` | Set a uniform weight (for example 300) so one server can't starve the others' IO. Device-specific throttles (`BlkioDeviceReadBps`) only once the data device is known. |
 | Logs | `LogConfig` | Always cap logs, for example `{ Type: 'local', Config: { 'max-size': '10m', 'max-file': '3' } }`. Uncapped json-file logs can fill the host disk. |
 
@@ -131,7 +128,7 @@ apps/worker/src/docker/
   container-spec.builder.ts   # pure: ServerRuntimeSpec -> ContainerCreateOptions
   container-policy.ts         # pure: assertSafeCreateOptions(options) - throws on violation
   resource-limits.ts          # pure: validated resources -> Docker limit fields
-  names.ts                    # containerName(), dataDirFor(), label keys
+  names.ts                    # containerName(), volumeName(), label keys
   observed-state.ts           # inspect -> ObservedContainerState mapping
 ```
 
@@ -161,11 +158,11 @@ Rules:
 
 | Operation | Behavior |
 |---|---|
-| **create** | `ensureImage` (pinned, with a timeout), then `ensureNetwork`, then make sure the data dir exists (path checks, ownership), then `createContainer`. On **409 Conflict** (name exists), inspect the existing container: if its `server-id` label and `spec-hash` match, return it with `created: false`. If they don't, throw `ContainerSpecDriftError`; never delete it silently. |
+| **create** | `ensureImage` (pinned, with a timeout), then `ensureNetwork`, then make sure the labeled volume `hm-data-<serverId>` exists (create is idempotent), then `createContainer`. On **409 Conflict** (name exists), inspect the existing container: if its `server-id` label and `spec-hash` match, return it with `created: false`. If they don't, throw `ContainerSpecDriftError`; never delete it silently. |
 | **start** | Inspect; if it's already running, return. Docker answers **304** for "already started", which counts as success. A missing container raises `ContainerNotFoundError`, and orchestration decides whether to recreate it. |
 | **stop** | Graceful stop with `t = StopTimeout` (the itzg image saves the world on SIGTERM). 304 (already stopped) and 404 (missing) both count as success. Escalate to kill only after the timeout. |
 | **restart** | `stop` then `start`, as separate observable steps. Don't use Docker's restart endpoint, so each step can be logged and retried. |
-| **remove** | Stop first, then remove the container with `v: false`. Data is deleted separately and explicitly. 404 counts as success. |
+| **remove** | Stop first, then remove the container with `v: false`. The data volume is removed separately and explicitly (`removeVolume`). 404 counts as success. |
 | **inspect** | Map to `{ exists, running, status, exitCode, oomKilled, health, startedAt, finishedAt }`. |
 | **logs** | `Tty: false` at create, then demultiplex stdout and stderr. Bound `tail` (≤ 1000) and line length (for example 4 KiB). Strip ANSI and control characters. Logs are untrusted: the web app renders them as text, never HTML. Rate-limit streaming. |
 | **healthcheck** | Set it explicitly at create: `Test: ['CMD', 'mc-health']` (shipped with the itzg image). The API takes durations in **nanoseconds**. Use a long `StartPeriod` for modded types (see orchestration timeouts). |
@@ -200,7 +197,7 @@ const options: ContainerCreateOptions = {
     SecurityOpt: ['no-new-privileges:true'],
     ReadonlyRootfs: spec.readOnlyRootfs,            // true unless the type has a documented exception
     Tmpfs: { '/tmp': 'rw,nosuid,nodev,size=256m' },
-    Mounts: [{ Type: 'bind', Source: dataDirFor(spec.serverId), Target: '/data', ReadOnly: false }],
+    Mounts: [{ Type: 'volume', Source: volumeName(spec.serverId), Target: '/data', ReadOnly: false }],
     Memory: limits.memoryBytes,
     MemorySwap: limits.memoryBytes,
     NanoCpus: limits.nanoCpus,
@@ -241,9 +238,9 @@ export function assertSafeCreateOptions(o: ContainerCreateOptions): void {
   must(Number.isInteger(h.PidsLimit) && h.PidsLimit! > 0, 'pids');
   must(h.Mounts?.length === 1, 'single mount');
   const m = h.Mounts![0];
-  must(m.Type === 'bind' && m.Target === '/data' && m.Source === dataDirFor(serverId)  // exactly THIS server's dir
-    && (m.BindOptions?.Propagation ?? 'rprivate') === 'rprivate', 'mount');
-  must(/^[1-9]\d*:[1-9]\d*$/.test(o.User ?? '') && uidOf(o.User!) >= 100000, 'non-root dedicated user');
+  must(m.Type === 'volume' && m.Target === '/data' && m.Source === volumeName(serverId)  // exactly THIS server's volume
+    && !m.VolumeOptions?.DriverConfig, 'mount');                                      // no driver opts (could bind host paths)
+  must(/^[1-9]\d*:[1-9]\d*$/.test(o.User ?? '') && uidOf(o.User!) < 65536, 'non-root user inside the userns range');
   must(isAllowlistedImage(o.Image), 'image');
   must(Object.keys(o).every((k) => ALLOWED_CREATE_KEYS.has(k)), 'unexpected create key'); // e.g. no Entrypoint/Cmd overrides
 }
@@ -282,8 +279,11 @@ HostConfig: { Memory: dto.memory * 1024 * 1024, NanoCpus: dto.cpus * 1e9 } // dt
 // ❌ Global cleanup
 await docker.pruneContainers();
 
-// ❌ Following symlinks from the host
-fs.readFile(path.join(dataDir, 'server.properties'));       // may be a symlink to a host file
+// ❌ Reading tenant files from the host (even through the volume's mountpoint)
+fs.readFile(`/var/lib/docker/165536.165536/volumes/hm-data-${id}/_data/server.properties`); // use getArchive/exec
+
+// ❌ Host bind mounts for tenant data
+Mounts: [{ Type: 'bind', Source: `/srv/mc/${id}`, Target: '/data' }]
 
 // ❌ Platform secret inside a tenant container
 Env: [`CF_API_KEY=${process.env.CF_API_KEY}`]
@@ -315,37 +315,35 @@ export function toDockerLimits(r: { heapMb: number; cpuMillis: number; pids: num
 }
 ```
 
-**Path safety:**
+**Deterministic, validated names:**
 
 ```ts
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export function dataDirFor(serverId: string): string {
+export function volumeName(serverId: string): string {
   if (!UUID_RE.test(serverId)) throw new InvalidServerIdError();
-  const dir = path.resolve(config.dataRoot, serverId);
-  const rel = path.relative(config.dataRoot, dir);
-  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) throw new PathTraversalError();
-  return dir;
+  return `hm-data-${serverId.toLowerCase()}`;
 }
+export const containerName = (serverId: string) => `hm-mc-${volumeName(serverId).slice('hm-data-'.length)}`;
 ```
 
 ## Checklist (mandatory before any container-related implementation)
 
 - [ ] Docker is reached only from the worker, through the `ContainerRuntime` port. No API or web code imports the SDK.
 - [ ] No shell execution. Any CLI fallback uses `execFile` with argv and a timeout.
-- [ ] Container name, labels and data path derive from a validated UUID, never user strings.
+- [ ] Container name, labels and volume name derive from a validated UUID, never user strings.
 - [ ] Image is allowlisted and pinned.
 - [ ] Env built from an allowlist, every value validated, no newlines or NUL, no platform secrets.
 - [ ] `Privileged: false`, `CapDrop: ['ALL']`, no `CapAdd`, `no-new-privileges`, non-root `User`.
-- [ ] No host namespaces, no host network, no devices, no Docker socket, single `/data` mount under `DATA_ROOT`.
+- [ ] No host namespaces, no host network, no devices, no Docker socket, single `/data` mount: the server's own named volume.
 - [ ] `ReadonlyRootfs` with tmpfs (or a documented, tested exception for this server type).
 - [ ] `Memory` = `MemorySwap`, heap < limit, `NanoCpus` an integer, `PidsLimit` > 0, `nofile` set, log rotation set.
 - [ ] Only the game port is published, on the configured `HostIp`. RCON is not published.
 - [ ] `assertSafeCreateOptions` runs right before create.
 - [ ] Every operation is idempotent (409 / 304 / 404 handled as described).
-- [ ] No host-side reads or writes inside tenant directories (archive API or exec only).
-- [ ] Policy check is an allowlist, and the mount source is exactly `dataDirFor(serverId)`.
-- [ ] UID/GID ≥ 100000 with no host account. userns-remap or rootless is required before public users.
+- [ ] No host-side reads or writes inside tenant volumes (archive API or exec only); no host bind mounts.
+- [ ] Policy check is an allowlist, and the mount is exactly `{ Type: 'volume', Source: volumeName(serverId) }`.
+- [ ] Non-root UID/GID below 65536; the worker refuses to run without `userns-remap` unless `DOCKER_REQUIRE_USERNS=false` (dev only).
 - [ ] Secrets are redacted from logs and errors.
 - [ ] Unit tests for the spec builder, policy and limits. A gated integration test inspects a real container and asserts the security options (see `testing-and-quality-gates`).
 

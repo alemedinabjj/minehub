@@ -10,7 +10,7 @@ description: Use whenever writing, reviewing or changing HubMine's database laye
 The database is HubMine's **source of truth for intent** and its **main concurrency guard**. This skill makes the schema itself prevent the dangerous states (duplicate containers, double operations, port collisions, cross-tenant access), so application code doesn't have to be perfect for the system to stay correct.
 
 Dependencies:
-- `nestjs-backend-standards`: repositories are the only Prisma callers. Ownership is scoped by `userId`.
+- `nestjs-backend-standards`: repositories are the only Prisma callers. Access is scoped through `ServerMember` memberships.
 - `minecraft-server-orchestration`: the state machine whose transitions this layer enforces.
 - `secure-docker-provisioning`: secrets stored here (the RCON password) are consumed there.
 
@@ -24,7 +24,13 @@ Dependencies:
 
 ## Project status
 
-Greenfield: there's no `schema.prisma` yet. The model below is the **recommended starting schema**. Check the installed Prisma major version before writing config. Prisma 7 changed configuration (`prisma.config.ts`, the new `prisma-client` generator, driver adapters such as `@prisma/adapter-pg`). Use Context7 to confirm the syntax for the installed version. Recommended location: `packages/db/prisma/schema.prisma`.
+Implemented in **`packages/database`** with **Prisma 7.10** (8.x is still RC; don't upgrade without a decision):
+
+- `prisma/schema.prisma` with `generator client { provider = "prisma-client", output = "../src/generated/prisma" }` (generated code is gitignored; `pnpm build` runs `prisma generate`).
+- `prisma.config.ts` (schema, migrations path, `DATABASE_URL`; loads the repo-root `.env` locally via `process.loadEnvFile`).
+- `src/client.ts` → `createPrismaClient({ connectionString })` using the **`@prisma/adapter-pg`** driver adapter. The `?schema=` URL parameter (understood by the Prisma CLI, not by `pg`) is stripped from the URL and passed as `PrismaPg(..., { schema })`. One client per process.
+- `src/errors.ts` (`uniqueViolationTarget`, `isUniqueViolation`, `isNotFound`, `isRetryableTransactionError`), `src/crypto/secret-box.ts` (`SecretBox`, `randomSecret`).
+- Migration `20261004000000_init` was generated with `prisma migrate diff --from-empty --to-schema ... --script` and the hand-written invariants appended. A test (`src/constraints.spec.ts`) asserts the CHECKs equal `RESOURCE_LIMITS` and the partial unique indexes exist.
 
 ## Core principles
 
@@ -32,13 +38,13 @@ Greenfield: there's no `schema.prisma` yet. The model below is the **recommended
 2. **Every state change is a conditional write.** Never read, check in JS, then write.
 3. **Short transactions, no I/O inside.** No Docker, Redis or HTTP calls inside a DB transaction.
 4. **Migrations are immutable history.** Once applied anywhere shared, fix forward with a new migration.
-5. **Tenant scoping is in the `where` clause.** Every query on user-owned data includes `userId` (or comes from a row that was already scoped).
+5. **Tenant scoping is in the `where` clause.** Every query on user-owned data filters by the caller's membership (`members: { some: { userId, role: { in: roles } } }`), or comes from a row that was already scoped.
 
 ## Mandatory rules
 
 ### IDs, types and naming
 
-- Primary keys: UUID, `String @id @default(uuid()) @db.Uuid`. If the installed Prisma version supports `uuid(7)`, prefer it for better index locality. Never expose sequential integer IDs.
+- Primary keys: UUIDv7, `String @id @default(uuid(7)) @db.Uuid` (time-ordered: good index locality, and event ids double as a cursor). Never expose sequential integer IDs.
 - Models in PascalCase, fields in camelCase, mapped to snake_case tables and columns with `@@map` / `@map`.
 - Timestamps: `createdAt DateTime @default(now()) @db.Timestamptz(3)` and `updatedAt DateTime @updatedAt @db.Timestamptz(3)` on every mutable model. Always `timestamptz`, always UTC.
 - Bounded strings get `@db.VarChar(n)`. Store resources as integers (`heapMb`, `cpuMillis`), never floats. Their bounds come from `RESOURCE_LIMITS` in `packages/shared`.
@@ -78,16 +84,17 @@ Prisma's schema language can't express partial unique indexes or `CHECK` constra
 
 **Scenario: two START requests at the same moment.** Neither may create a second operation or container. Layered defense:
 
-1. **Conditional transition:** `updateMany({ where: { id, userId, deletedAt: null, status: { in: allowedFrom } }, data: { status: 'STARTING', version: { increment: 1 }, statusChangedAt: now } })`. Only one request sees `count === 1`.
+1. **Conditional transition:** `updateMany({ where: { id, deletedAt: null, members: { some: { userId, role: { in: roles } } }, status: { in: allowedFrom } }, data: { status: 'STARTING', version: { increment: 1 }, statusChangedAt: now } })`. Only one request sees `count === 1`.
 2. **One-active-operation partial unique index:** the losing request's `serverJob.create` raises `P2002`, which maps to 409 `OPERATION_IN_PROGRESS`, even if step 1 were ever bypassed.
 3. **BullMQ `jobId = ServerJob.id`:** duplicate dispatches of the same operation collapse.
 4. **Docker:** the deterministic container name `hm-mc-<id>` makes a second create fail with 409 (see `secure-docker-provisioning`).
 
 ```ts
 async transitionWithOperation(args: {
-  userId: string; serverId: string; from: ServerStatus[]; to: ServerStatus;
+  userId: string; roles: ServerRole[]; serverId: string; from: ServerStatus[]; to: ServerStatus;
   jobType: ServerJobType; idempotencyKey?: string;
 }) {
+  const access = { deletedAt: null, members: { some: { userId: args.userId, role: { in: args.roles } } } };
   return this.prisma.$transaction(async (tx) => {
     if (args.idempotencyKey) {
       const existing = await tx.serverJob.findUnique({
@@ -95,15 +102,15 @@ async transitionWithOperation(args: {
       });
       if (existing) {
         if (existing.serverId !== args.serverId || existing.type !== args.jobType) throw new IdempotencyKeyReuseError(); // 422
-        return { server: await tx.server.findFirstOrThrow({ where: { id: args.serverId, userId: args.userId } }), operation: existing };
+        return { server: await tx.server.findFirstOrThrow({ where: { id: args.serverId, ...access } }), operation: existing };
       }
     }
     const { count } = await tx.server.updateMany({
-      where: { id: args.serverId, userId: args.userId, deletedAt: null, status: { in: args.from } },
+      where: { id: args.serverId, ...access, status: { in: args.from } },
       data: { status: args.to, statusChangedAt: new Date(), version: { increment: 1 } },
     });
     if (count === 0) {
-      const exists = await tx.server.findFirst({ where: { id: args.serverId, userId: args.userId, deletedAt: null }, select: { status: true } });
+      const exists = await tx.server.findFirst({ where: { id: args.serverId, ...access }, select: { status: true } });
       throw exists ? new InvalidTransitionError(exists.status, args.to) : new ServerNotFoundError();
     }
     const operation = await tx.serverJob.create({
@@ -161,13 +168,16 @@ Transaction rules:
 ## Architecture
 
 ```text
-packages/db/
+packages/database/
+  prisma.config.ts
   prisma/schema.prisma
   prisma/migrations/<timestamp>_<name>/migration.sql
-  prisma/seed.ts                 # idempotent upserts, fake data only
-  src/prisma.service.ts          # Nest provider: connect / shutdown hooks
-  src/errors.ts                  # Prisma error → domain error helpers
+  prisma/seed.ts                 # (future) idempotent upserts, fake data only
+  src/client.ts                  # createPrismaClient (adapter-pg, schema param)
+  src/errors.ts                  # Prisma error helpers (constraint-name aware)
   src/crypto/secret-box.ts       # AES-GCM encrypt/decrypt for secret columns
+  src/generated/prisma/          # generated client (gitignored)
+apps/api/src/database/database.module.ts  # PRISMA + SecretBox providers, disconnect on shutdown
 apps/api/src/**/**.repository.ts       # scoped, API-facing queries
 apps/worker/src/**/**.repository.ts    # worker-facing queries (no userId scoping; system actor)
 ```
@@ -176,119 +186,29 @@ apps/worker/src/**/**.repository.ts    # worker-facing queries (no userId scopin
 
 The rules in this section are as binding as the mandatory rules above. They describe how to implement them.
 
-### Recommended schema
+### Schema (as implemented)
 
-```prisma
-enum ServerStatus { CREATING STARTING RUNNING STOPPING STOPPED SUSPENDED ERROR DELETING DELETED }
-enum ServerType   { VANILLA PAPER PURPUR FABRIC FORGE NEOFORGE MODPACK }
-enum ServerJobType   { CREATE START STOP RESTART SUSPEND RESUME DELETE }
-enum ServerJobStatus { PENDING QUEUED RUNNING SUCCEEDED FAILED CANCELLED }
+The source of truth is `packages/database/prisma/schema.prisma`; read it instead of copying models from here. Summary:
 
-model User {
-  id           String   @id @default(uuid()) @db.Uuid
-  email        String   @unique @db.VarChar(254)        // stored lowercase; stays reserved after soft delete until purge/anonymization
-  passwordHash String   @map("password_hash")
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
-  deletedAt    DateTime? @map("deleted_at") @db.Timestamptz(3)
-  servers      Server[]
-  @@map("users")
-}
+| Model | Purpose / key rules |
+|---|---|
+| `User` | email unique (lowercase), argon2id `passwordHash`, soft delete |
+| `RefreshToken` | SHA-256 `tokenHash` unique, `familyId` for reuse detection, `revokedAt`, `replacedById`, `expiresAt` |
+| `ServerNode` | data-plane machine: `name` unique, `status` (ONLINE/DRAINING/OFFLINE/ERROR), capacity (`totalCpuMillis`, `totalMemoryMb`, `totalStorageMb`), `lastHeartbeat` JSON + `lastHeartbeatAt` |
+| `Server` | `ownerId`, `status` (`ServerStatus`: CREATING, STARTING, ONLINE, STOPPING, STOPPED, SUSPENDED, CRASHED, ERROR, DELETING, DELETED), `statusReason`, `worldType`, `software`, `minecraftVersion`, `loaderVersion`, `modpackRef` JSON, `players`, `heapMb`, `cpuMillis`, `storageLimitMb`, `nodeId`, `containerId` unique, `port`, `hostname`, `eulaAcceptedAt`, `crashCount`, `version`, soft delete |
+| `ServerConfiguration` | 1:1, allowlisted `properties` JSON, `rconPasswordEnc` (AES-256-GCM via `SecretBox`), `revision` |
+| `ServerMember` | `(serverId, userId)` PK, `role` (OWNER/ADMIN/MANAGER/MODERATOR/VIEWER): **the** authorization path |
+| `ServerJob` | operation = BullMQ job id; `type`, `status` (PENDING/QUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED), `stage` (latest milestone), sanitized `errorCode`/`errorMessage`, `idempotencyKey`, `correlationId` |
+| `ServerEvent` | append-only timeline; index `(serverId, id)` (UUIDv7 id = cursor) |
+| `AuditLog` | append-only platform audit: actor, action, target, serverId, metadata, ip, requestId |
 
-model Server {
-  id               String       @id @default(uuid()) @db.Uuid
-  userId           String       @map("user_id") @db.Uuid
-  name             String       @db.VarChar(32)
-  slug             String       @db.VarChar(40)
-  status           ServerStatus @default(CREATING)
-  statusReason     String?      @map("status_reason") @db.VarChar(64)  // CRASH, OOM, IDLE... (sanitized)
-  statusChangedAt  DateTime     @default(now()) @map("status_changed_at") @db.Timestamptz(3)
-  minecraftVersion String       @map("minecraft_version") @db.VarChar(32)
-  serverType       ServerType   @map("server_type")
-  loaderVersion    String?      @map("loader_version") @db.VarChar(32)   // Fabric/Forge/NeoForge, from catalog
-  modpackRef       Json?        @map("modpack_ref")    // MODPACK only: { source: "MODRINTH"|"CURSEFORGE", projectId, versionId }, schema-validated
-  heapMb           Int          @map("heap_mb")        // JVM heap the user chose; container limit = heap + overhead (secure-docker-provisioning)
-  cpuMillis        Int          @map("cpu_millis")
-  containerId      String?      @unique @map("container_id") @db.VarChar(64)
-  port             Int?
-  eulaAcceptedAt   DateTime     @map("eula_accepted_at") @db.Timestamptz(3)
-  lastSeenAt       DateTime?    @map("last_seen_at") @db.Timestamptz(3)
-  version          Int          @default(0)                      // optimistic lock counter
-  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt        DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
-  deletedAt        DateTime?    @map("deleted_at") @db.Timestamptz(3)
-
-  user   User          @relation(fields: [userId], references: [id], onDelete: Restrict)
-  config ServerConfig?
-  events ServerEvent[]
-  jobs   ServerJob[]
-
-  @@index([userId, createdAt])
-  @@index([status])
-  // Partial unique (user_id, slug) and (port) WHERE deleted_at IS NULL: see migration SQL
-  @@map("servers")
-}
-
-model ServerConfig {
-  serverId        String   @id @map("server_id") @db.Uuid
-  properties      Json                                   // allowlisted keys only, validated before write
-  rconPasswordEnc Bytes    @map("rcon_password_enc")     // AES-256-GCM ciphertext (iv|tag|data)
-  revision        Int      @default(1)
-  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
-  server          Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
-  @@map("server_configs")
-}
-
-model ServerEvent {                                      // append-only audit/history
-  id          String        @id @default(uuid()) @db.Uuid
-  serverId    String        @map("server_id") @db.Uuid
-  type        String        @db.VarChar(48)            // STATUS_CHANGED, CONFIG_UPDATED, CRASH_DETECTED...
-  fromStatus  ServerStatus? @map("from_status")
-  toStatus    ServerStatus? @map("to_status")
-  actorType   String        @map("actor_type") @db.VarChar(16)   // USER | SYSTEM | ADMIN
-  actorId     String?       @map("actor_id") @db.Uuid
-  operationId String?       @map("operation_id") @db.Uuid
-  message     String?       @db.VarChar(500)           // sanitized, user-safe
-  metadata    Json?
-  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
-  server      Server        @relation(fields: [serverId], references: [id], onDelete: Cascade)
-  @@index([serverId, createdAt(sort: Desc)])
-  @@map("server_events")
-}
-
-model ServerJob {                                        // an "operation"; id == BullMQ jobId
-  id             String          @id @default(uuid()) @db.Uuid
-  serverId       String          @map("server_id") @db.Uuid
-  type           ServerJobType
-  status         ServerJobStatus @default(PENDING)
-  requestedById  String?         @map("requested_by_id") @db.Uuid   // null = system
-  idempotencyKey String?         @map("idempotency_key") @db.VarChar(64)
-  attempts       Int             @default(0)
-  lastError      String?         @map("last_error") @db.VarChar(1000) // sanitized
-  correlationId  String?         @map("correlation_id") @db.VarChar(64)
-  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
-  startedAt      DateTime?       @map("started_at") @db.Timestamptz(3)
-  finishedAt     DateTime?       @map("finished_at") @db.Timestamptz(3)
-  updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
-  server         Server          @relation(fields: [serverId], references: [id], onDelete: Cascade)
-  @@unique([requestedById, idempotencyKey])
-  @@index([serverId, createdAt])
-  @@index([status, createdAt])                           // outbox sweeper
-  // Partial unique (server_id) WHERE status IN ('PENDING','QUEUED','RUNNING'): see migration SQL
-  @@map("server_jobs")
-}
-```
-
-Hand-written migration SQL that goes with it:
+Hand-written migration SQL that goes with it (in `20261004000000_init`):
 
 ```sql
-CREATE UNIQUE INDEX servers_user_slug_live_key ON servers (user_id, slug) WHERE deleted_at IS NULL;
-CREATE UNIQUE INDEX servers_port_live_key      ON servers (port) WHERE deleted_at IS NULL AND port IS NOT NULL;
-CREATE UNIQUE INDEX server_jobs_one_active_key ON server_jobs (server_id)
-  WHERE status IN ('PENDING', 'QUEUED', 'RUNNING');
-ALTER TABLE servers ADD CONSTRAINT servers_heap_mb_check    CHECK (heap_mb BETWEEN 1024 AND 32768);   -- = RESOURCE_LIMITS.heapMb
-ALTER TABLE servers ADD CONSTRAINT servers_cpu_millis_check CHECK (cpu_millis BETWEEN 500 AND 16000); -- = RESOURCE_LIMITS.cpuMillis
-ALTER TABLE servers ADD CONSTRAINT servers_port_check       CHECK (port IS NULL OR port BETWEEN 1024 AND 65535);
+CREATE UNIQUE INDEX "servers_owner_slug_live_key" ON "servers" ("owner_id", "slug") WHERE "deleted_at" IS NULL;
+CREATE UNIQUE INDEX "servers_node_port_live_key"  ON "servers" ("node_id", "port") WHERE "deleted_at" IS NULL AND "port" IS NOT NULL;
+CREATE UNIQUE INDEX "server_jobs_one_active_key"  ON "server_jobs" ("server_id") WHERE "status" IN ('PENDING', 'QUEUED', 'RUNNING');
+-- CHECKs: heap_mb 1024..32768, cpu_millis 500..16000 (= RESOURCE_LIMITS), storage_limit_mb, port 1024..65535, crash_count >= 0, node capacity > 0
 ```
 
 Note: in PostgreSQL, `NULL`s are distinct in unique constraints, so `@@unique([requestedById, idempotencyKey])` doesn't constrain rows without a key, which is what we want.
@@ -341,14 +261,14 @@ prisma.server.findUnique({ where: { id: params.id } });
 ## Examples
 
 ```bash
-pnpm --filter @hubmine/db exec prisma migrate dev --name add_server_jobs          # local only
-pnpm --filter @hubmine/db exec prisma migrate dev --create-only --name partial_indexes
-pnpm --filter @hubmine/db exec prisma migrate deploy                              # CI/CD
-pnpm --filter @hubmine/db exec prisma generate
-pnpm --filter @hubmine/db exec prisma validate && pnpm --filter @hubmine/db exec prisma format
+pnpm --filter @hubmine/database exec prisma migrate dev --name add_server_jobs          # local only
+pnpm --filter @hubmine/database exec prisma migrate dev --create-only --name partial_indexes
+pnpm --filter @hubmine/database exec prisma migrate deploy                              # CI/CD
+pnpm --filter @hubmine/database exec prisma generate
+pnpm --filter @hubmine/database exec prisma validate && pnpm --filter @hubmine/database exec prisma format
 ```
 
-The package name `@hubmine/db` and `pnpm` are assumptions. Use the real workspace names and package manager once they exist.
+Root shortcuts: `pnpm db:migrate` (deploy), `pnpm db:migrate:dev`, `pnpm db:studio`. Without a running database, generate SQL with `prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script` (or `--from-migrations` for later changes) and review it before committing.
 
 ## Checklist
 

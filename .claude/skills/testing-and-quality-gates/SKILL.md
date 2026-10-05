@@ -24,13 +24,13 @@ The other skills say *what* must be true. This skill says *how to prove it*:
 
 ## Project status
 
-Greenfield: no test runner, CI or scripts exist yet. Recommended stack, to confirm when the repo is scaffolded:
-- **Jest** (the NestJS default) or **Vitest**. Use whichever the repo adopts, consistently, in all packages.
-- **supertest** for HTTP integration tests.
-- **Testcontainers** (PostgreSQL, Redis) for integration tests.
-- **Playwright** for web E2E.
+Stack in use (no CI yet):
+- **Vitest everywhere** (packages, web, api, worker). Specs live next to the code as `*.spec.ts`.
+- The API runs Vitest through **`unplugin-swc`**, because Nest's DI needs decorator metadata and esbuild doesn't emit it.
+- **API integration tests** (`*.int-spec.ts`, `vitest.integration.config.ts`) boot the **real `AppModule`** (via `src/test/test-app.ts`, with the same `configureApp` hardening as `main.ts`) against the **docker-compose** Postgres/Redis. Each test file gets a fresh Postgres schema (`?schema=test_<random>`, `prisma migrate deploy`), dropped afterwards. No Testcontainers.
+- **supertest** for HTTP; **Playwright** for web E2E (Chromium needs system libraries, installed by `scripts/setup-wsl-docker.sh`).
 
-Always read the real `package.json` scripts before running gates. The commands below assume `pnpm` + workspace scripts named `lint`, `typecheck`, `test`, `test:integration`, `test:e2e`, `build`.
+Root scripts (read `package.json` before running): `pnpm setup` (env + install + build packages + `infra:up` + `db:migrate`), `pnpm infra:up`, `pnpm db:migrate`, `pnpm dev`, `pnpm build`, `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm test:integration`, `pnpm test:e2e`. Workspace packages compile to `dist/`, so `typecheck` and `test` build them first.
 
 ## Core principles
 
@@ -47,8 +47,8 @@ Always read the real `package.json` scripts before running gates. The commands b
 
 | Level | Scope | Real dependencies | Use for | Speed target |
 |---|---|---|---|---|
-| **Unit** | A function or class | None (fakes for ports) | State machine, spec builder, policy check, env mapper, resource limits, reconciler diff, services with faked repos, DTO validation, mappers | < 10 ms each |
-| **Integration** | A module plus its infra | PostgreSQL, Redis (Testcontainers); **fake** `ContainerRuntime` | Repositories and constraints, concurrent transitions, outbox, HTTP endpoints through Nest (`supertest`), auth and ownership, BullMQ processors on real Redis | seconds |
+| **Unit** | A function or class | None (fakes for ports) | State machine, spec builder, policy check, env mapper, resource limits, reconciler diff, services with faked repos, schema validation (`ZodPipe`), mappers | < 10 ms each |
+| **Integration** | A module plus its infra | PostgreSQL, Redis (docker-compose, schema per test file); **fake** `ContainerRuntime` | Repositories and constraints, concurrent transitions, outbox, HTTP endpoints through Nest (`supertest`), auth and ownership, BullMQ processors on real Redis | seconds |
 | **Docker contract** (gated) | `DockerodeRuntime` adapter | Real Docker daemon | The adapter really applies the security options and limits; idempotency codes (304/404/409); log demuxing | slow; run with `HUBMINE_DOCKER_TESTS=1` |
 | **E2E** | The whole system | Full stack (compose) | Critical user journeys through the web UI or public API | minutes |
 
@@ -70,9 +70,10 @@ Always read the real `package.json` scripts before running gates. The commands b
 Run against the composed stack, with the worker's Docker runtime faked or using a lightweight test image unless the job is the gated real-Docker E2E:
 
 1. Register and log in (plus a failed login).
-2. Create a server → appears with `CREATING`, then reaches `STOPPED` or `RUNNING`.
+2. Create a server → appears with `CREATING`, then reaches `STOPPED` or `ONLINE`.
 3. View the server details and status.
-4. Start → `RUNNING`.
+4. Start → `ONLINE`.
+4b. A crash (container killed) → `CRASHED`, then auto-recovery back to `ONLINE`.
 5. Stop → `STOPPED`.
 6. Delete → disappears from the list.
 7. Second user can't see or act on the first user's server.
@@ -99,7 +100,7 @@ A change is **not ready** until all applicable gates pass locally (and in CI onc
 1. lint          pnpm lint
 2. typecheck     pnpm typecheck            (tsc --noEmit across workspaces)
 3. unit          pnpm test
-4. integration   pnpm test:integration     (needs Docker for Testcontainers)
+4. integration   pnpm test:integration     (needs `pnpm infra:up`: compose Postgres + Redis)
 5. build         pnpm build
 6. e2e           pnpm test:e2e             (when the change touches a user flow)
 7. docker        HUBMINE_DOCKER_TESTS=1 pnpm --filter <worker> test:docker   (when apps/worker/src/docker changes)
@@ -124,8 +125,8 @@ When reporting results: state exactly which gates ran and their results. If a ga
 ```text
 apps/api/
   src/**/*.spec.ts                 # unit (next to the code)
-  test/integration/**/*.int-spec.ts
-  test/factories/                  # data builders
+  src/**/*.int-spec.ts             # integration: real AppModule + compose Postgres/Redis
+  src/test/test-app.ts             # boots the app in a fresh schema; drops it on close
 apps/worker/
   src/**/*.spec.ts                 # unit (state machine, spec builder, reconciler diff…)
   test/integration/**/*.int-spec.ts  # processors + real Redis/Postgres + FakeContainerRuntime
@@ -133,7 +134,7 @@ apps/worker/
   test/fakes/fake-container-runtime.ts
 apps/web/
   e2e/**/*.e2e.ts                  # Playwright
-packages/test-utils/               # shared factories, Testcontainers setup, fake clock
+packages/test-utils/               # (future) shared factories, fake clock
 ```
 
 ## Implementation guidelines
@@ -204,8 +205,9 @@ runtime.crash(serverId, { exitCode: 137, oomKilled: true }); // simulate OOM kil
 // ALLOWED_TRANSITIONS, or the test could never catch drift between the code and the documented rules.
 const EXPECTED_ALLOWED = new Set([
   'CREATING>STOPPED', 'CREATING>STARTING', 'CREATING>ERROR', 'CREATING>DELETING',
-  'STARTING>RUNNING', 'STARTING>ERROR', 'STARTING>STOPPING', 'STARTING>DELETING',
-  'RUNNING>STOPPING', 'RUNNING>ERROR', 'RUNNING>DELETING',
+  'STARTING>ONLINE', 'STARTING>ERROR', 'STARTING>STOPPING', 'STARTING>DELETING',
+  'ONLINE>STOPPING', 'ONLINE>CRASHED', 'ONLINE>DELETING',
+  'CRASHED>STARTING', 'CRASHED>ERROR', 'CRASHED>STOPPED', 'CRASHED>DELETING',
   'STOPPING>STOPPED', 'STOPPING>SUSPENDED', 'STOPPING>ERROR', 'STOPPING>DELETING',
   'STOPPED>STARTING', 'STOPPED>DELETING',
   'SUSPENDED>STARTING', 'SUSPENDED>DELETING',
@@ -228,7 +230,7 @@ it('creates exactly one container when server.start is delivered twice', async (
   await processor.process(jobFor(op));
   await processor.process(jobFor(op));            // redelivery after stall
   expect(runtime.containersFor(server.id)).toHaveLength(1);
-  expect(await statusOf(server.id)).toBe('RUNNING');
+  expect(await statusOf(server.id)).toBe('ONLINE');
 });
 ```
 

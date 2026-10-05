@@ -115,12 +115,13 @@ The UI shows the `ServerStatus` from `minecraft-server-orchestration` exactly; i
 
 | Status | Label (pt-BR) | Color | Icon / motion |
 |---|---|---|---|
-| `RUNNING` | Online | success | solid dot |
+| `ONLINE` | Online | success | solid dot |
 | `STARTING` | Iniciando | warning | spinner or pulsing dot |
 | `CREATING` | Criando | warning | progress steps |
 | `STOPPING` | Parando | warning | spinner |
 | `STOPPED` | Parado | neutral | hollow dot |
 | `SUSPENDED` | Hibernando | info | moon/sleep icon |
+| `CRASHED` | Caiu | danger | alert icon; "recuperando…" while auto-recovery is pending, sanitized reason + actions (start, view logs) |
 | `ERROR` | Erro | danger | alert icon + sanitized reason + action (retry, view logs) |
 | `DELETING` | Excluindo | danger (muted) | spinner, actions disabled |
 
@@ -188,7 +189,7 @@ The steps are driven by real progress from the backend (operation status and `Se
 
 ```
 Criando servidor  →  Provisionando  →  Baixando imagem  →  Iniciando Minecraft  →  Servidor online
-(operation queued)   (CREATING:        (CREATING:           (STARTING: waiting     (RUNNING: healthy)
+(operation queued)   (CREATING:        (CREATING:           (STARTING: waiting     (ONLINE: healthy)
                       port, data dir)   image pull)          for healthy)
 ```
 

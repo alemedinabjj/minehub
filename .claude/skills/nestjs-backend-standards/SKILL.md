@@ -1,6 +1,6 @@
 ---
 name: nestjs-backend-standards
-description: Use whenever writing, reviewing or changing HubMine's NestJS backend (apps/api and the NestJS parts of apps/worker). This covers modules, controllers, services, repositories, DTOs and validation, guards, interceptors, pipes, exception filters, error and response format, REST conventions, pagination, authentication, authorization and ownership checks, rate limiting, CORS, security headers, logging, configuration and dependency injection, and the 202-Accepted pattern for long-running operations. Database specifics are in prisma-postgres-engineering, lifecycle and queue internals in minecraft-server-orchestration.
+description: Use whenever writing, reviewing or changing HubMine's NestJS backend (apps/api; the worker is a plain Node process and only shares the config, database and queue packages). This covers modules, controllers, services, repositories, DTOs and validation, guards, interceptors, pipes, exception filters, error and response format, REST conventions, pagination, authentication, authorization and ownership checks, rate limiting, CORS, security headers, logging, configuration and dependency injection, and the 202-Accepted pattern for long-running operations. Database specifics are in prisma-postgres-engineering, lifecycle and queue internals in minecraft-server-orchestration.
 ---
 
 # NestJS Backend Standards
@@ -24,14 +24,14 @@ Dependencies:
 
 ## Project status
 
-Greenfield: there's no `apps/api` yet, and the auth strategy, logger and test runner haven't been chosen. The libraries named here (`@nestjs/config`, `@nestjs/throttler`, `@nestjs/bullmq`, `helmet`, `nestjs-pino`, `class-validator`, `class-transformer`, `argon2`) are **recommendations**. Check `package.json` before importing anything. When adding a dependency, say so explicitly in the PR. Use Context7 for current NestJS APIs.
+`apps/api` exists: **NestJS 12, ESM** (`"type": "module"`, `module: nodenext`, relative imports end in `.js`), compiled with `tsc` and run with `node --watch` in dev. Installed and in use: `@nestjs/jwt`, `@nestjs/throttler`, `nestjs-pino`, `helmet`, `cookie-parser`, `argon2`, `ioredis`, `zod`. **Not used:** `class-validator`/`class-transformer` and `@nestjs/config` (see Validation and Configuration). Implemented: config, database and Redis modules, global exception filter, `ZodPipe`, auth (register/login/refresh/logout/me), audit service, `/health/live` and `/health/ready`. Not yet: servers, operations, catalog, SSE. Check `package.json` before importing anything new and say so in the PR. Nest 12 APIs are newer than most references: read the installed types/docs before using an unfamiliar API.
 
 ## Core principles
 
 1. **Thin controllers, rich services, dumb repositories.** HTTP concerns, business rules and persistence stay separate.
 2. **Deny by default.** Every route is authenticated unless it's marked `@Public()`. Every resource query is scoped to its owner.
 3. **Never trust input.** Params, query, body, headers, cookies and job payloads are validated and typed before use.
-4. **Explicit output.** Responses are mapped DTOs, never raw Prisma models.
+4. **Explicit output.** Responses go through mappers to the shared response contracts, never raw Prisma models.
 5. **Async for slow work.** Anything that touches Docker or takes more than about 1 s is a queued operation that returns `202`.
 6. **One way to do each thing.** One error format, one response envelope, one pagination style, one config access path.
 
@@ -39,67 +39,54 @@ Greenfield: there's no `apps/api` yet, and the auth strategy, logger and test ru
 
 ### Validation
 
-Global pipe in `main.ts`:
+Input is validated with the **shared zod contracts** from `@hubmine/shared`, through `ZodPipe` (`src/common/validation/zod.pipe.ts`). The web client validates with the very same schemas, so there's one source of truth for every rule. `class-validator` DTOs are **not** used.
 
 ```ts
-app.useGlobalPipes(new ValidationPipe({
-  whitelist: true,                 // strip unknown properties
-  forbidNonWhitelisted: true,      // ...and reject them with 400
-  transform: true,                 // produce DTO class instances
-  transformOptions: { enableImplicitConversion: false }, // convert types explicitly with @Type
-  validationError: { target: false, value: false },      // never echo input back
-}));
+@Post()
+@HttpCode(HttpStatus.ACCEPTED)
+create(
+  @CurrentUser() user: AuthenticatedUser,
+  @Body(new ZodPipe(createServerRequestSchema)) body: CreateServerRequest,
+  @Headers('idempotency-key', IdempotencyKeyPipe) idempotencyKey: string | undefined,
+) { … }
 ```
 
-- Every body, query and params object is a DTO class with `class-validator` decorators. No `@Body() body: any` and no untyped `@Query()`.
-- Route IDs use `new ParseUUIDPipe()`. It accepts any UUID version, so it works whether the schema generates v4 or v7. Pin `version` only if the schema pins one.
-- Query numbers and booleans use `@Type(() => Number)` and explicit bounds (`@IsInt() @Min(1) @Max(100)`).
-- Strings always have length bounds and a format (`@Length`, `@Matches`). Arrays have `@ArrayMaxSize`. Nested objects use `@ValidateNested() @Type(() => X)`.
-- Enum fields use `@IsEnum` / `@IsIn` with the shared enum.
-- Set a body size limit (for example 100 KB JSON) in `main.ts`. Uploads (mods, worlds) are a separate design with streaming, size limits, type checks and scanning, and must be designed before they're implemented.
-- DTO validation checks shape. The service checks meaning (version exists in the catalog, memory within plan, quota not exceeded).
-- Headers you rely on (`Idempotency-Key`, `X-Request-Id`) are validated too (format and length).
-
-```ts
-export class CreateServerDto {
-  @IsString() @Length(3, 32) @Matches(/^[\p{L}\p{N} _-]+$/u)
-  name!: string;
-
-  @IsEnum(ServerType)
-  serverType!: ServerType;
-
-  @IsString() @Matches(/^[0-9A-Za-z.\-_]{1,32}$/)
-  minecraftVersion!: string;          // existence checked against the catalog in the service
-
-  @IsInt() @Min(RESOURCE_LIMITS.heapMb.min) @Max(RESOURCE_LIMITS.heapMb.max)
-  heapMb!: number;                     // multiple of step + plan limit (heap + overhead) checked in the service
-
-  @IsInt() @Min(RESOURCE_LIMITS.cpuMillis.min) @Max(RESOURCE_LIMITS.cpuMillis.max)
-  cpuMillis!: number;
-
-  @Equals(true)
-  acceptEula!: true;                   // recorded as eulaAcceptedAt
-}
-```
+- `ZodPipe` applies `.strict()`: **unknown keys are rejected with 400** (mass-assignment protection), never silently dropped.
+- Failures become `400 VALIDATION_FAILED` with `details: [{ field, code }]`. Schemas use **error codes as messages** (`'NAME_TOO_SHORT'`), so clients map them to copy. Details never include the submitted value.
+- Every body and query gets a schema. No `@Body() body: any`, no untyped `@Query()`. Query numbers use `z.coerce.number().int().min().max()`.
+- Strings always have length bounds and a format. Arrays have `.max()`. Enums come from the shared constants. Resource bounds come from `RESOURCE_LIMITS`.
+- Route IDs use `new ParseUUIDPipe()`. It accepts any UUID version (the schema generates `uuid(7)`).
+- Headers you rely on are validated: `Idempotency-Key` through an `IdempotencyKeyPipe` (`/^[A-Za-z0-9_-]{8,64}$/`), `X-Request-Id` in the logger's `genReqId` (same pattern; otherwise a new id is minted).
+- The JSON body limit is 100 KB (`app.useBodyParser('json', { limit: '100kb' })`). Uploads (mods, worlds) are a separate design with streaming, size limits, type checks and scanning, and must be designed before they're implemented.
+- The schema checks shape. The service checks meaning (version exists in the catalog, memory within plan, quota not exceeded).
 
 ### Authentication and authorization
 
-- Global `AuthGuard` registered with `APP_GUARD`. Routes opt out explicitly with `@Public()`.
-- Recommended strategy (not decided): short-lived JWT access token plus a rotating refresh token in an `httpOnly`, `Secure`, `SameSite=Lax` cookie, with refresh tokens stored hashed and revocable. Passwords are hashed with argon2id. If cookies carry auth, protect state-changing routes against CSRF (SameSite plus an origin check or CSRF token).
+- Global `JwtAuthGuard` registered with `APP_GUARD`. Routes opt out explicitly with `@Public()`.
+- Implemented strategy (`src/auth/`):
+  - Passwords: **argon2id** (19 MiB, t=2, p=1). Login against an unknown email still runs a verify against a dummy hash, so timing doesn't reveal registered emails; wrong email and wrong password return the same `401 INVALID_CREDENTIALS`.
+  - Access token: **HS256 JWT**, `iss=hubmine-api`, `aud=hubmine-web`, default 15 min (`JWT_ACCESS_TTL_SECONDS`), sent as `Authorization: Bearer`. The web keeps it **in memory only**.
+  - Refresh token: opaque 32 random bytes; only its **SHA-256** is stored (`RefreshToken`). Sent only as cookie **`hm_rt`, `HttpOnly`, `SameSite=Strict`, `Path=/auth`**, `Secure` per `COOKIE_SECURE`.
+  - Rotation on every `/auth/refresh`, atomic (`updateMany where revokedAt IS NULL`). **Reuse detection:** a rotated token presented again within 15 s is a benign race (two tabs) → `401` only; later reuse → revoke the whole token family and audit `session.reuse_detected`.
+  - Cookie-authenticated routes (`/auth/refresh`, `/auth/logout`) also require `Origin` to equal `WEB_ORIGIN` (`403 FORBIDDEN_ORIGIN`).
+  - Rate limits: register 5/min, login 10/min, refresh 30/min per client IP; global default 120/min.
+  - Audit (`AuditLog`): `user.registered`, `user.login`, `user.login_failed`, `user.logout`, `session.reuse_detected`.
 - `@CurrentUser()` provides the authenticated user ID. **Never** read `userId` from the body, query or params for ownership.
-- **Ownership is part of the query:**
+- **Access is part of the query, through memberships.** `ServerMember` (roles `OWNER`, `ADMIN`, `MANAGER`, `MODERATOR`, `VIEWER`) is the single authorization path; the owner also has an `OWNER` membership, so sharing needs no special case. No membership (or an insufficient role) → **404**, never 403, so ids can't be probed.
 
 ```ts
 // repository
-findOwned(userId: string, id: string) {
-  return this.prisma.server.findFirst({ where: { id, userId, deletedAt: null } });
+findAccessible(userId: string, id: string, roles: ServerRole[] = ALL_ROLES) {
+  return this.prisma.server.findFirst({
+    where: { id, deletedAt: null, members: { some: { userId, role: { in: roles } } } },
+  });
 }
 // service
-const server = await this.repo.findOwned(user.id, id);
+const server = await this.repo.findAccessible(user.id, id, ['OWNER', 'ADMIN', 'MANAGER']);
 if (!server) throw new ServerNotFoundError();   // 404, even if it exists for another user
 ```
 
-  Looking up by ID and then comparing `server.userId !== user.id` is acceptable only when you can't avoid it. Scoping the query is preferred, because a forgotten comparison can't leak data. Writes are scoped the same way (`updateMany({ where: { id, userId, status: { in: … } } })`).
+  Looking up by ID and then comparing `server.userId !== user.id` is acceptable only when you can't avoid it. Scoping the query is preferred, because a forgotten comparison can't leak data. Writes are scoped the same way (`updateMany({ where: { id, members: { some: { userId, role: { in: roles } } }, status: { in: … } } })`).
 - Admin and support access uses a role guard plus an audit event. It never bypasses ownership silently.
 - Quotas (servers per user, total memory) are checked in the service inside the same transaction as the create.
 
@@ -112,8 +99,8 @@ if (!server) throw new ServerNotFoundError();   // 404, even if it exists for an
 
 ### Configuration
 
-- `@nestjs/config` with a validation schema (zod or Joi). The app **fails at boot** if a required variable is missing or invalid.
-- Access config only through a typed config service or provider. Use `process.env` only inside the config module.
+- `packages/config` (`apiConfigSchema`, `loadConfig`) validates the environment with zod. The app **fails at boot** listing the invalid variable **names** (never values).
+- Inject it with `@Inject(API_CONFIG)` (`src/config/config.module.ts`). Use `process.env` only inside the config package. Local dev reads the repo-root `.env` generated by `scripts/dev-env.sh` (`node --env-file-if-exists`).
 - Secrets come from env or a secret manager, never from committed files. Keep `.env.example` current, with placeholder values.
 
 ### Logging and audit
@@ -132,20 +119,23 @@ HTTP ─► Guard(Auth) ─► Pipe(Validation) ─► Controller ─► Service
 Errors ─► Domain error ─► Global exception filter ─► { error, requestId }
 ```
 
-The worker app reuses the same `packages/db` repositories pattern and config validation, but it has no HTTP layer. It's built with `NestFactory.createApplicationContext`.
+The worker is **not** a Nest app: it's a plain Node ESM process with an explicit composition root (`apps/worker/src/main.ts`). It reuses `packages/config`, `packages/database` and `packages/queue`, but has no HTTP layer.
 
-### Monorepo layout (recommended)
+### Monorepo layout (as implemented)
 
 ```text
 apps/
-  web/       Next.js frontend
-  api/       NestJS HTTP API: no Docker access, produces queue jobs only
-  worker/    NestJS standalone app (createApplicationContext): BullMQ processors + Docker
-packages/
-  db/        Prisma schema, migrations, generated client, PrismaService
-  shared/    shared enums, job names, job payload schemas, API contract types
-  config/    shared tsconfig / eslint presets
+  web/        Next.js 16 frontend
+  api/        NestJS 12 HTTP API (ESM): no Docker access, produces queue jobs only
+  worker/     plain Node ESM process: BullMQ processors, schedulers, node agent (Docker later)
+packages/     (all ESM, compiled to dist/ with tsc; build them before the apps)
+  shared/     zod API contracts, enums, presets, RESOURCE_LIMITS, recommendation
+  config/     zod env schemas: apiConfigSchema, workerConfigSchema, loadConfig
+  database/   Prisma 7.10 schema + migrations, generated client, createPrismaClient, SecretBox
+  queue/      QUEUES, SERVER_JOB_NAMES, serverJobPayloadSchema, jobOptionsFor
 ```
+
+No `apps/scheduler` or `apps/agent` yet (see `minecraft-server-orchestration`).
 
 `apps/api` must never depend on Docker SDKs or `apps/worker` internals. Shared contracts live in `packages/shared`.
 
@@ -164,16 +154,17 @@ apps/api/src/
     servers.controller.ts
     servers.service.ts
     servers.repository.ts
-    dto/ create-server.dto.ts, list-servers.query.ts, server.response.ts
-    servers.mapper.ts
+    servers.mapper.ts  # model -> response (no secrets/internal fields)
+  audit/             # AuditService (append-only)
+  database/, redis/  # PRISMA and REDIS providers with shutdown hooks
   operations/        # read-only status of ServerJob operations
   health/            # liveness/readiness
 ```
 
 - One feature per module. Export only what other modules need (usually the service).
-- **Controllers:** routing, DTO binding, `@CurrentUser()`, calling one service method, setting the status code. No Prisma, no business rules, no `try/catch` used to map errors.
+- **Controllers:** routing, schema binding (`ZodPipe`), `@CurrentUser()`, calling one service method, setting the status code. No Prisma, no business rules, no `try/catch` used to map errors.
 - **Services:** business rules, ownership, plan limits, transitions, transactions (through repositories), enqueueing. No `Request` or `Response` objects.
-- **Repositories:** the only layer that calls Prisma. Methods that read or write user-owned data **take `userId`** as a required argument.
+- **Repositories:** the only layer that calls Prisma. Methods that read or write user-owned data **take `userId`** as a required argument and scope through `ServerMember`.
 - **DI:** constructor injection only. External dependencies (queue, clock, ID generator, crypto) are injected through tokens or classes so tests can replace them. No `new SomeService()` inside providers. No module-level singletons with state.
 
 ## Implementation guidelines
@@ -190,7 +181,7 @@ The rules in this section are as binding as the mandatory rules above. They desc
 | Update settings | `PATCH /servers/:id` | 200 (or 202 if it needs an operation) |
 | Start / stop / restart / suspend / resume | `POST /servers/:id/start` (etc.) | **202** |
 | Delete | `DELETE /servers/:id` | **202** |
-| Operation status | `GET /servers/:id/operations/:operationId` | 200 (scoped: `findFirst({ where: { id: operationId, serverId: id, server: { userId, deletedAt: null } } })`, else 404) |
+| Operation status | `GET /servers/:id/operations/:operationId` | 200 (scoped: `findFirst({ where: { id: operationId, serverId: id, server: { deletedAt: null, members: { some: { userId } } } } })`, else 404) |
 | Logs (stream) | `GET /servers/:id/logs/stream` (SSE) | 200 |
 | Liveness / readiness | `GET /health/live`, `GET /health/ready` | 200 / 503 |
 
@@ -234,13 +225,13 @@ Status codes:
 ### Pagination, filtering, sorting
 
 - Cursor pagination: `?limit=20&cursor=<opaque>`, default 20, max 100. The cursor is an opaque, encoded `(createdAt, id)` pair.
-- Filters and sort fields come from an **allowlist** DTO (`status`, `serverType`; `sort=createdAt:desc|name:asc`). Never pass a client field name into a Prisma `orderBy` or `where` dynamically.
+- Filters and sort fields come from an **allowlist** query schema (`status`, `serverType`; `sort=createdAt:desc|name:asc`). Never pass a client field name into a Prisma `orderBy` or `where` dynamically.
 
 ### Async operations (202 pattern)
 
 ```text
 POST /servers/:id/start
-  → validate DTO + headers + auth
+  → validate body schema + headers + auth
   → service: one transaction (conditional transition + ServerJob + ServerEvent)
   → dispatch through the outbox (details: prisma-postgres-engineering, Transactional outbox)
   → 202 { data: { server, operation } }, Location: /servers/:id/operations/:operationId
@@ -262,7 +253,7 @@ POST /servers/:id/start
 ## Security considerations
 
 - Insecure direct object reference (IDOR) is the main risk in a multi-tenant hosting platform. Every route with `:id` needs an ownership test (see `testing-and-quality-gates`).
-- Mass assignment: `whitelist` + `forbidNonWhitelisted` plus explicit DTO-to-data mapping. Never `prisma.server.update({ data: dto })` when the DTO could grow fields like `status` or `userId`.
+- Mass assignment: strict schemas (`ZodPipe` rejects unknown keys) plus explicit input-to-data mapping. Never `prisma.server.update({ data: body })` when the schema could grow fields like `status` or `userId`.
 - Response leaks: mappers expose only public fields. `containerId`, RCON secrets and internal IPs are never serialized.
 - Enumeration: 404 for both "missing" and "not yours". Uniform login error messages.
 - DoS: body size limits, pagination caps, rate limits, and no unbounded log or file reads.
@@ -275,7 +266,7 @@ POST /servers/:id/start
 @Get(':id') get(@Param('id') id: string) { return this.prisma.server.findUnique({ where: { id } }); }
 
 // ❌ Trusting client ownership
-@Post() create(@Body() dto: CreateServerDto & { userId: string }) { … }
+@Post() create(@Body() body: CreateServerRequest & { userId: string }) { … }
 
 // ❌ Blocking request on infrastructure
 @Post(':id/start') async start(…) { await this.docker.getContainer(c).start(); return { ok: true }; }
@@ -334,7 +325,7 @@ export class ServersService {
 ## Checklist
 
 - [ ] Controller is thin. Service holds the rules. Only the repository touches Prisma.
-- [ ] Every input has a DTO with bounds. UUID params use `ParseUUIDPipe`.
+- [ ] Every input goes through `ZodPipe` with a shared schema (bounds, strict). UUID params use `ParseUUIDPipe`.
 - [ ] Route is authenticated (or explicitly `@Public()` with a reason).
 - [ ] Ownership is enforced in the query. "Not yours" returns 404. There's a test for it.
 - [ ] Response goes through a mapper. No secrets or internal fields.

@@ -26,7 +26,11 @@ Dependencies:
 
 ## Project status
 
-Greenfield: no queue, worker or state machine exists yet. Everything here is the recommended design. Check the repo before assuming any file, queue or table exists.
+Partially implemented (verify against the repo before relying on any file):
+
+- **Exists:** `apps/worker` as a plain Node ESM process (no Nest) with an explicit composition root in `src/main.ts`; BullMQ 6 queues `server-provisioning`, `server-lifecycle`, `server-maintenance`; payload validation and dispatch by job name (`src/processors/server-job.processor.ts`, unregistered handlers fail with `UnrecoverableError('HANDLER_NOT_IMPLEMENTED')`); `LocalNode` heartbeat (upserts the `ServerNode` row every 15 s); the outbox sweeper; graceful SIGTERM/SIGINT shutdown. Queue contracts live in `packages/queue` (`QUEUES`, `SERVER_JOB_NAMES`, `MAINTENANCE_JOB_NAMES`, `serverJobPayloadSchema`, `jobOptionsFor`, `queueForJob`).
+- **Not yet:** lifecycle handlers, state machine module, reconciler, Docker adapter, health monitor, logs.
+- **No `apps/scheduler` and no `apps/agent`:** periodic work (heartbeat, outbox sweep, reconcile, idle detection) runs as BullMQ **job schedulers** (`upsertJobScheduler`, idempotent, one schedule for N workers) on `server-maintenance`. Node selection is a pure function. `LocalNode` is the node agent for the MVP behind a `NodeRuntime`-style interface; a remote `hubmine-agent` (mTLS) can implement it later.
 
 ## Core principles
 
@@ -42,7 +46,12 @@ Greenfield: no queue, worker or state machine exists yet. Everything here is the
 
 ### State machine
 
-States (enum `ServerStatus`): `CREATING`, `STARTING`, `RUNNING`, `STOPPING`, `STOPPED`, `SUSPENDED`, `ERROR`, `DELETING`, `DELETED` (terminal, soft-deleted row).
+States (enum `ServerStatus`, defined in `@hubmine/shared` and the Prisma schema): `CREATING`, `STARTING`, `ONLINE`, `STOPPING`, `STOPPED`, `SUSPENDED`, `CRASHED`, `ERROR`, `DELETING`, `DELETED` (terminal, soft-deleted row).
+
+- `ONLINE`: container running **and** Minecraft healthy.
+- `CRASHED`: the server stopped unexpectedly (crash, OOM, container missing, unhealthy beyond threshold). Auto-recovery may still bring it back.
+- `ERROR`: needs user or operator action (provisioning failed, recovery exhausted, stop/delete failed).
+- Restart, backup and update are **operations** (`ServerJob`), never statuses: the UI shows "operation in progress" next to the lifecycle status.
 
 ```text
             ┌──────────── create ────────────┐
@@ -54,8 +63,11 @@ States (enum `ServerStatus`): `CREATING`, `STARTING`, `RUNNING`, `STOPPING`, `ST
         STARTING ◄──── start ──── STOPPED / SUSPENDED / ERROR
             │ healthy                  │
             ▼                          │
-        RUNNING ──stop/suspend/restart──► STOPPING ──► STOPPED | SUSPENDED
-            │ crash / health timeout
+        ONLINE ──stop/suspend/restart──► STOPPING ──► STOPPED | SUSPENDED
+            │ crash / OOM / missing
+            ▼
+         CRASHED ──auto-recovery / start──► STARTING
+            │ 3 crashes in 15 min
             ▼
           ERROR
   any non-terminal state ──delete──► DELETING ──► DELETED
@@ -69,22 +81,25 @@ Valid transitions (the single source of truth is `ALLOWED_TRANSITIONS` in code, 
 | CREATING | STARTING | provisioning done with autostart |
 | CREATING | ERROR | provisioning failed after retries, or timed out |
 | STOPPED, SUSPENDED, ERROR | STARTING | start / resume / restart second phase |
-| STARTING | RUNNING | container running **and** healthy |
+| STARTING | ONLINE | container running **and** healthy (Minecraft ready) |
 | STARTING | ERROR | start failed, or health timeout |
 | STARTING | STOPPING | user stop during start: stop supersedes the active start/resume (see below) |
-| RUNNING | STOPPING | stop / suspend / restart first phase |
-| RUNNING | ERROR | crash, OOM, or unhealthy beyond threshold (reconciler) |
+| ONLINE | STOPPING | stop / suspend / restart first phase |
+| ONLINE | CRASHED | crash, OOM, container missing, or unhealthy beyond threshold (reconciler) |
+| CRASHED | STARTING | auto-recovery (fewer than 3 crashes in 15 min) or user start |
+| CRASHED | ERROR | recovery exhausted (3 crashes in 15 min) |
+| CRASHED | STOPPED | reconciler only: container found cleanly stopped |
 | STOPPING | STOPPED | stop or restart-phase-1 finished |
 | STOPPING | SUSPENDED | suspend finished |
 | STOPPING | ERROR | stop failed even after kill |
 | ERROR | STOPPED | reconciler only: container found cleanly stopped after an error |
-| CREATING, STOPPED, SUSPENDED, ERROR, RUNNING, STARTING, STOPPING | DELETING | delete requested (the running job is cancelled or superseded) |
-| DELETING | DELETED | container removed and data purged or scheduled |
+| CREATING, STOPPED, SUSPENDED, CRASHED, ERROR, ONLINE, STARTING, STOPPING | DELETING | delete requested (the running job is cancelled or superseded) |
+| DELETING | DELETED | container removed and data volume removed or scheduled for purge |
 | DELETING | ERROR | delete failed after retries (needs operator attention) |
 
-Invalid examples, which must be rejected with `409 SERVER_INVALID_TRANSITION` at the API or as a no-op in the worker: `RUNNING → STARTING`, `STOPPED → STOPPING`, `DELETED → *`, `DELETING → STARTING`, `CREATING → RUNNING` (must pass through `STARTING`).
+Invalid examples, which must be rejected with `409 SERVER_INVALID_TRANSITION` at the API or as a no-op in the worker: `ONLINE → STARTING`, `STOPPED → STOPPING`, `DELETED → *`, `DELETING → STARTING`, `CREATING → ONLINE` (must pass through `STARTING`), `CRASHED → ONLINE` (must pass through `STARTING`).
 
-`restart` is not a state. It's an operation that runs `RUNNING → STOPPING → STOPPED → STARTING → RUNNING` inside one job. If phase 2 fails, the server ends in `ERROR`, not stuck in `STOPPED`.
+`restart` is not a state. It's an operation that runs `ONLINE → STOPPING → STOPPED → STARTING → ONLINE` inside one job. If phase 2 fails, the server ends in `ERROR`, not stuck in `STOPPED`.
 
 Store `ServerJob.type` (or a `pendingAction`) so `STOPPING` knows whether it ends in `STOPPED` or `SUSPENDED`.
 
@@ -152,6 +167,10 @@ async process(job: Job<ServerJobPayload>) {
 
 ```text
 apps/worker/src/
+  main.ts                     # composition root: config, logger, Prisma, queues, workers, schedulers, shutdown
+  nodes/local-node.ts         # MVP node agent: capacity + heartbeat (exists)
+  outbox/outbox-sweeper.ts    # re-dispatch stale PENDING operations (exists)
+  processors/server-job.processor.ts  # payload validation + dispatch by job name (exists)
   lifecycle/
     state-machine.ts          # ALLOWED_TRANSITIONS, canTransition(), pure
     server-lifecycle.service.ts
@@ -168,9 +187,7 @@ apps/worker/src/
   locks/
     server-lock.service.ts
   docker/                     # see secure-docker-provisioning
-packages/shared/src/jobs/
-  names.ts                    # 'server.create', ... constants
-  payloads.ts                 # ServerJobPayload type + runtime schema
+packages/queue/src/index.ts   # QUEUES, SERVER_JOB_NAMES, serverJobPayloadSchema, jobOptionsFor (exists)
 ```
 
 `state-machine.ts`, `reconciler` diffing and `env-mapper.ts` are pure functions with exhaustive unit tests.
@@ -183,12 +200,14 @@ The rules in this section are as binding as the mandatory rules above. They desc
 
 | Operation | In-flight status | Steps (each idempotent) | Success to |
 |---|---|---|---|
-| create | CREATING | allocate port (if not already), make sure the data dir exists, pull the pinned image, create the container (409 with matching spec-hash = reuse), store `containerId` | STOPPED (or STARTING with autostart, then the start path) |
-| start / resume | STARTING | make sure the container exists (recreate from spec if missing), `start` (304 ok), wait until healthy within the type's timeout | RUNNING |
+| create | CREATING | allocate port (if not already), make sure the named volume `hm-data-<serverId>` exists, pull the pinned image, create the container (409 with matching spec-hash = reuse), store `containerId` | STOPPED (or STARTING with autostart, then the start path) |
+| start / resume | STARTING | make sure the container exists (recreate from spec if missing), `start` (304 ok), wait until healthy within the type's timeout | ONLINE |
 | stop | STOPPING | graceful `stop` with StopTimeout, kill after it, verify not running | STOPPED |
 | suspend | STOPPING | same as stop; record the reason (`IDLE` / `USER` / `BILLING`) | SUSPENDED |
-| restart | STOPPING then STARTING | stop phase, then start phase, in one job | RUNNING |
-| delete | DELETING | stop, remove the container, release the port, purge or schedule purge of data, soft-delete the row | DELETED |
+| restart | STOPPING then STARTING | stop phase, then start phase, in one job | ONLINE |
+| delete | DELETING | stop, remove the container, release the port, remove (or schedule removal of) the `hm-data-<serverId>` volume, soft-delete the row | DELETED |
+
+**Provisioning milestones.** While creating, the worker records each observable milestone as a `ServerEvent` (and as `ServerJob.stage`), in this order: `PROVISION_NODE_SELECTED`, `PROVISION_STORAGE_READY` (volume exists), `PROVISION_IMAGE_READY`, `PROVISION_CONTAINER_CREATED`, `PROVISION_CONTAINER_STARTED`. "Minecraft ready" is not an event: it's the transition to `ONLINE` after the health check. Install/configure phases inside the itzg first boot can only be inferred from logs, so they are hints at most, never stages (the UI must not fake progress). The contract lives in `@hubmine/shared` (`PROVISIONING_EVENT_TYPES`).
 
 Timeouts (config, per type; starting values):
 
@@ -205,8 +224,9 @@ The reconciler runs at worker startup and every 30 to 60 s. It reads every non-t
 
 | DB status | Docker observed | Action |
 |---|---|---|
-| RUNNING | running + healthy | Update `lastSeenAt`. |
-| RUNNING | exited, OOM-killed, missing, or unhealthy > N checks | → `ERROR` with a reason (`CRASH`, `OOM`, `UNHEALTHY`, `MISSING`). If auto-recovery is on and fewer than 3 crashes in 15 min: enqueue `server.start` with backoff. Otherwise leave it in `ERROR`. |
+| ONLINE | running + healthy | Update `lastSeenAt`. |
+| ONLINE | exited, OOM-killed, missing, or unhealthy > N checks | → `CRASHED` with a reason (`CRASH`, `OOM`, `UNHEALTHY`, `MISSING`), increment `crashCount`. If auto-recovery is on and fewer than 3 crashes in 15 min: enqueue `server.start` with backoff (`CRASHED → STARTING`). Otherwise `CRASHED → ERROR`. |
+| CRASHED | exited cleanly (exit 0, e.g. `/stop` typed in game) | → `STOPPED` (reconciler only). |
 | STOPPED / SUSPENDED | running | Unexpected. A **system stop** of the container through `ContainerRuntime.stop` (under the per-server lock), with **no status transition** (the status is already correct). Record a `ServerEvent` (`UNEXPECTED_RUNNING_STOPPED`, actor `SYSTEM`). |
 | STARTING / STOPPING / CREATING / DELETING past timeout, no live job | any | If an outbox `PENDING` job exists, re-dispatch it. Otherwise → `ERROR` (STARTING/CREATING/STOPPING) or re-enqueue delete (DELETING). |
 | DELETING | container exists | Make sure a `server.delete` is queued. |
@@ -214,11 +234,11 @@ The reconciler runs at worker startup and every 30 to 60 s. It reads every non-t
 | row missing or DELETED | container labeled managed | Orphan: stop it right away, record it, remove it after a grace period (for example 24 h). Never delete its data automatically. |
 | any | Docker daemon unreachable | Change no state. Log, alert, back off. "Unknown" doesn't mean "crashed". |
 
-Host reboot: every container is `exited` and the restart policy is `no`. The reconciler sees `RUNNING` servers as down and goes through crash recovery, which brings back what users expect to be running. To tell a reboot apart from a crash, use the worker boot time, and don't count reboots toward the crash limit.
+Host reboot: every container is `exited` and the restart policy is `no`. The reconciler sees `ONLINE` servers as down and goes through crash recovery, which brings back what users expect to be running. To tell a reboot apart from a crash, use the worker boot time, and don't count reboots toward the crash limit.
 
 ### Health and idle suspension
 
-- Health = Docker health status `healthy` (`mc-health` in the itzg image). `RUNNING` requires `healthy`, not just `running`.
+- Health = Docker health status `healthy` (`mc-health` in the itzg image). `ONLINE` requires `healthy`, not just `running` (health levels: container running → Minecraft starting → Minecraft ready → unhealthy).
 - Idle detection, a recommended design not yet implemented: every few minutes the worker gets the player count, for example `exec ['rcon-cli', 'list']` or a server-list ping to the host port. If the count stays at 0 for longer than the plan's `idleTimeoutMinutes` (default 15), enqueue `server.suspend` with reason `IDLE`.
 - Resume is user-initiated (UI or API) for now. Future: wake-on-connect through a proxy (for example mc-router or Velocity) or the itzg autopause features. Each needs a security review: autopause may need extra capabilities, which conflicts with `CapDrop: ['ALL']`.
 
@@ -239,7 +259,7 @@ The spec builder turns validated server fields into env. Check the variable name
 
 - **Env keys the mapper never sets from user input, and that users can never set** (they enable code execution, URL downloads or break isolation): `JVM_OPTS`, `JVM_XX_OPTS`, `JVM_DD_OPTS`, `EXEC_DIRECTLY`, `CUSTOM_SERVER`, `MODS`, `PLUGINS`, `MODS_FILE`, `GENERIC_PACK`, `GENERIC_PACKS*`, `RCON_CMDS_*`, `UID`, `GID`, `SERVER_PORT`, `RCON_PORT`, `ENABLE_AUTOPAUSE`, `ENABLE_AUTOSTOP`. `MEMORY`, `INIT_MEMORY` and `MAX_MEMORY` are set **only** by the mapper, from `toDockerLimits`. A unit test asserts that none of these keys can come out of user-controlled config.
 - Port: allocated from `HUBMINE_PORT_RANGE` with a unique constraint. The container always listens on 25565; only the host port changes.
-- Volume: `/data` maps to the server's dedicated directory (see `secure-docker-provisioning`).
+- Volume: `/data` is the server's named volume `hm-data-<serverId>` (see `secure-docker-provisioning`); never a host bind mount.
 - Config changes (server.properties, plugins, mods) are applied while the server is `STOPPED`, or saved and marked "restart required". Files are written symlink-safely through the container archive API or exec, never by following host paths.
 
 ### Server address
@@ -285,8 +305,9 @@ Design so a worker can run on another machine: payloads only carry IDs, all coor
 ```ts
 export const ALLOWED_TRANSITIONS: Record<ServerStatus, readonly ServerStatus[]> = {
   CREATING:  ['STOPPED', 'STARTING', 'ERROR', 'DELETING'],
-  STARTING:  ['RUNNING', 'ERROR', 'STOPPING', 'DELETING'],
-  RUNNING:   ['STOPPING', 'ERROR', 'DELETING'],
+  STARTING:  ['ONLINE', 'ERROR', 'STOPPING', 'DELETING'],
+  ONLINE:    ['STOPPING', 'CRASHED', 'DELETING'],
+  CRASHED:   ['STARTING', 'ERROR', 'STOPPED', 'DELETING'],
   STOPPING:  ['STOPPED', 'SUSPENDED', 'ERROR', 'DELETING'],
   STOPPED:   ['STARTING', 'DELETING'],
   SUSPENDED: ['STARTING', 'DELETING'],
@@ -298,7 +319,7 @@ export const allowedFrom = (to: ServerStatus) =>
   (Object.keys(ALLOWED_TRANSITIONS) as ServerStatus[]).filter((s) => ALLOWED_TRANSITIONS[s].includes(to));
 ```
 
-`ERROR → STOPPED` is used only by the reconciler when it finds the container cleanly stopped after an error.
+`ERROR → STOPPED` and `CRASHED → STOPPED` are used only by the reconciler when it finds the container cleanly stopped.
 
 **Idempotent start step:**
 
@@ -307,7 +328,7 @@ const observed = await runtime.inspect(serverId);
 if (!observed.exists) await runtime.create(specFor(server));   // 409 + same spec → reuse
 if (!observed.running) await runtime.start(serverId);           // 304 → ok
 await waitUntilHealthy(serverId, timeoutFor(server, 'start'), signal); // throws StartTimeoutError
-await servers.transition(serverId, { from: ['STARTING'], to: 'RUNNING', operationId });
+await servers.transition(serverId, { from: ['STARTING'], to: 'ONLINE', operationId });
 ```
 
 ## Checklist
