@@ -176,7 +176,7 @@ function Wizard() {
   const inProvisioning = Boolean(provisioningTarget);
 
   return (
-    <div className="relative grid min-h-dvh grid-rows-[auto_1fr] lg:grid-cols-[minmax(0,1.15fr)_minmax(420px,1fr)] lg:grid-rows-1">
+    <div className="relative grid min-h-dvh grid-cols-[minmax(0,1fr)] grid-rows-[auto_1fr] lg:grid-cols-[minmax(0,1.15fr)_minmax(420px,1fr)] lg:grid-rows-1">
       {/* World preview: top banner on mobile, persistent left pane on desktop */}
       <div className="relative h-[34dvh] min-h-52 lg:sticky lg:top-0 lg:h-dvh">
         <WorldPreview scene={scene} />
@@ -201,12 +201,13 @@ function Wizard() {
       </div>
 
       <main className="relative flex min-h-0 flex-col border-border bg-background lg:h-dvh lg:border-l">
-        <header className="flex items-center gap-4 border-b border-border px-5 py-4 lg:px-8">
+        <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 border-b border-border px-5 py-4 md:flex-nowrap lg:px-8">
           <Link href="/" className="font-display text-xl text-foreground" aria-label="HubMine — início">
             Hub<span className="text-primary">Mine</span>
           </Link>
-          <div className="min-w-0 flex-1 pb-4 md:pb-5">
-            {current !== "intro" && !inProvisioning ? (
+          {/* Own row on small screens so seven steps never force horizontal scroll */}
+          {current !== "intro" && !inProvisioning ? (
+            <div className="order-last min-w-0 basis-full md:order-none md:flex-1 md:basis-auto md:pb-5">
               <WorldJourney
                 steps={steps}
                 current={current}
@@ -214,8 +215,8 @@ function Wizard() {
                 canOpen={(id) => canOpenStep(id, draft)}
                 onOpen={goTo}
               />
-            ) : null}
-          </div>
+            </div>
+          ) : null}
           <Link href="/" className="grid size-10 place-items-center rounded-sm text-muted hover:bg-surface-raised hover:text-foreground" aria-label="Sair da criação">
             <X className="size-5" aria-hidden />
           </Link>
