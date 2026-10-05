@@ -37,7 +37,7 @@ describe('loadConfig', () => {
     ).toThrow(/SECRETS_ENCRYPTION_KEY/);
   });
 
-  it('only accepts the pinned itzg image and a sane port range', () => {
+  it('only accepts a sane port range', () => {
     const worker = {
       ...validBase,
       MC_PUBLIC_HOST: 'localhost',
@@ -45,12 +45,11 @@ describe('loadConfig', () => {
       MC_UID: '1000',
       MC_GID: '1000',
     };
-    expect(loadConfig(workerConfigSchema, { ...worker, MC_IMAGE: 'itzg/minecraft-server:java21' }).MC_PORT_RANGE).toEqual({
+    expect(loadConfig(workerConfigSchema, worker).MC_PORT_RANGE).toEqual({
       from: 25565,
       to: 25664,
     });
-    expect(() => loadConfig(workerConfigSchema, { ...worker, MC_IMAGE: 'evil/image:latest' })).toThrow(/MC_IMAGE/);
-    expect(() => loadConfig(workerConfigSchema, { ...worker, MC_IMAGE: 'itzg/minecraft-server:java21', MC_PORT_RANGE: '80-90' })).toThrow(
+    expect(() => loadConfig(workerConfigSchema, { ...worker, MC_PORT_RANGE: '80-90' })).toThrow(
       /MC_PORT_RANGE/,
     );
   });

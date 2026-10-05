@@ -9,7 +9,9 @@
     "start": "node --enable-source-maps dist/main.js",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint src",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:docker": "vitest run --config vitest.docker.config.ts"
   },
   "dependencies": {
     "@hubmine/config": "workspace:*",
@@ -17,11 +19,13 @@
     "@hubmine/queue": "workspace:*",
     "@hubmine/shared": "workspace:*",
     "bullmq": "^6.3.11",
+    "dockerode": "^4.0.12",
     "ioredis": "^5.11.1",
     "pino": "^10.4.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@types/dockerode": "^4.0.1",
     "@types/node": "^24.19.1",
     "oxlint": "^1.86.0",
     "pino-pretty": "^13.1.3",

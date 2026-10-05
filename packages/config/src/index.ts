@@ -45,8 +45,6 @@ export const workerConfigSchema = base.extend({
   DOCKER_SOCKET_PATH: z.string().startsWith('/').default('/var/run/docker.sock'),
   /** Refuse to run tenant containers on a daemon without user-namespace remapping. */
   DOCKER_REQUIRE_USERNS: bool.default(true),
-  /** Pinned image; never user-provided. */
-  MC_IMAGE: z.string().regex(/^itzg\/minecraft-server:[A-Za-z0-9._-]+(@sha256:[a-f0-9]{64})?$/),
   MC_PUBLIC_HOST: z.string().min(1).max(253),
   MC_BIND_IP: z.ipv4().default('0.0.0.0'),
   MC_PORT_RANGE: portRange,

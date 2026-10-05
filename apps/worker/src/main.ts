@@ -1,8 +1,17 @@
 import { ConfigError, loadConfig, redisConnectionFromUrl, workerConfigSchema } from '@hubmine/config';
-import { createPrismaClient } from '@hubmine/database';
+import { createPrismaClient, SecretBox } from '@hubmine/database';
 import { MAINTENANCE_JOB_NAMES, QUEUES, type QueueName } from '@hubmine/queue';
 import { Queue, Worker } from 'bullmq';
+import { Redis } from 'ioredis';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { DockerodeRuntime } from './docker/dockerode.runtime.js';
+import { DEFAULT_TIMINGS, ServerLifecycle } from './lifecycle/server-lifecycle.js';
+import { ServerOpsRepository } from './lifecycle/server-ops.repository.js';
+import { CancellationHub } from './locks/cancellation.js';
+import { ServerLocks } from './locks/server-lock.js';
 import { createLogger } from './logger.js';
+import { detectIoWeight } from './nodes/cgroup.js';
+import { isHostPortFree } from './nodes/host-ports.js';
 import { LocalNode } from './nodes/local-node.js';
 import { OutboxSweeper } from './outbox/outbox-sweeper.js';
 import { createServerJobProcessor } from './processors/server-job.processor.js';
@@ -22,7 +31,29 @@ async function main() {
   const outbox = new OutboxSweeper(prisma, queues, log);
   await node.heartbeat();
 
-  const serverJobs = createServerJobProcessor({}, log);
+  const runtime = new DockerodeRuntime(config.DOCKER_SOCKET_PATH, { uid: config.MC_UID, gid: config.MC_GID, bindIp: config.MC_BIND_IP, ioWeight: detectIoWeight() }, config.DOCKER_REQUIRE_USERNS);
+  // Tenant containers only on a daemon with user-namespace remapping (secure-docker-provisioning).
+  await runtime.assertSecureDaemon();
+  if (!config.DOCKER_REQUIRE_USERNS) log.warn('DOCKER_REQUIRE_USERNS=false: development only, never in production');
+  await runtime.ensureNetwork();
+
+  const repo = new ServerOpsRepository(prisma);
+  const redis = new Redis({ ...connection, connectionName: 'hubmine-worker-locks' });
+  const cancellation = new CancellationHub(new Redis({ ...connection, connectionName: 'hubmine-worker-cancel' }), (id) => repo.isCancelled(id), log);
+  await cancellation.start();
+  const secrets = new SecretBox(config.SECRETS_ENCRYPTION_KEY);
+  const lifecycle = new ServerLifecycle({
+    repo,
+    runtime,
+    decryptSecret: (payload) => secrets.decrypt(payload),
+    node: { name: config.NODE_NAME, portRange: config.MC_PORT_RANGE, safeRatio: config.NODE_SAFE_RATIO, uid: config.MC_UID, gid: config.MC_GID },
+    isHostPortFree: (port) => isHostPortFree(config.MC_BIND_IP, port),
+    sleep: (ms, signal) => sleep(ms, undefined, { signal }),
+    now: Date.now,
+    timings: DEFAULT_TIMINGS,
+    log,
+  });
+  const serverJobs = createServerJobProcessor({ lifecycle, repo, locks: new ServerLocks(redis), cancellation, log });
   const workers = [
     new Worker(QUEUES.provisioning, serverJobs, { connection, concurrency: config.PROVISIONING_CONCURRENCY, lockDuration: 60_000 }),
     new Worker(QUEUES.lifecycle, serverJobs, { connection, concurrency: config.LIFECYCLE_CONCURRENCY, lockDuration: 60_000 }),
@@ -57,6 +88,8 @@ async function main() {
     hardExit.unref();
     await Promise.allSettled(workers.map((w) => w.close()));
     await Promise.allSettled(Object.values(queues).map((q) => q.close()));
+    await cancellation.close();
+    await redis.quit().catch(() => redis.disconnect());
     await prisma.$disconnect();
     log.info('bye');
     process.exit(0);

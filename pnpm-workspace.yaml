@@ -11,3 +11,7 @@ allowBuilds:
   argon2: true
   '@swc/core': true
   msgpackr-extract: true
+  # dockerode transitive deps: SSH transport and native helpers are unused (unix socket only).
+  cpu-features: false
+  protobufjs: false
+  ssh2: false

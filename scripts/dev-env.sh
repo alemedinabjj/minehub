@@ -34,7 +34,6 @@ SECRETS_ENCRYPTION_KEY=$(openssl rand -base64 32)
 
 NODE_NAME=local
 DOCKER_SOCKET_PATH=/var/run/docker.sock
-MC_IMAGE=itzg/minecraft-server:java21
 MC_PUBLIC_HOST=localhost
 MC_BIND_IP=0.0.0.0
 MC_PORT_RANGE=25565-25664

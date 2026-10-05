@@ -15,7 +15,7 @@
     "lint": "pnpm -r lint",
     "typecheck": "pnpm build:packages && pnpm -r typecheck",
     "test": "pnpm build:packages && pnpm -r test",
-    "test:integration": "pnpm --filter @hubmine/api test:integration",
+    "test:integration": "pnpm build:packages && pnpm --filter @hubmine/api --filter @hubmine/worker test:integration",
     "test:e2e": "pnpm --filter @hubmine/web test:e2e"
   }
 }
