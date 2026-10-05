@@ -40,6 +40,9 @@ importers:
       argon2:
         specifier: ^0.45.1
         version: 0.45.1
+      bullmq:
+        specifier: ^6.3.11
+        version: 6.3.11(ioredis@5.11.1)(pg@8.23.1)
       cookie-parser:
         specifier: ^1.4.7
         version: 1.4.7

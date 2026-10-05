@@ -10,7 +10,12 @@ import { createPrismaClient } from '@hubmine/database';
  * Boots the real AppModule against the docker-compose Postgres/Redis, in a fresh Postgres
  * schema per test file (migrated with `prisma migrate deploy`), and drops it afterwards.
  */
-export async function createTestApp(): Promise<{ app: INestApplication; close: () => Promise<void> }> {
+export interface TestAppOptions {
+  /** Replace providers (e.g. the job queue) with test doubles. */
+  overrides?: { token: unknown; value: unknown }[];
+}
+
+export async function createTestApp(options: TestAppOptions = {}): Promise<{ app: INestApplication; close: () => Promise<void> }> {
   const rootEnv = new URL('../../../../.env', import.meta.url);
   if (existsSync(rootEnv)) process.loadEnvFile(rootEnv);
   const base = process.env.DATABASE_URL;
@@ -32,7 +37,9 @@ export async function createTestApp(): Promise<{ app: INestApplication; close: (
     import('../configure-app.js'),
     import('@hubmine/config'),
   ]);
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+  let builder = Test.createTestingModule({ imports: [AppModule] });
+  for (const { token, value } of options.overrides ?? []) builder = builder.overrideProvider(token).useValue(value);
+  const moduleRef = await builder.compile();
   const app = moduleRef.createNestApplication<NestExpressApplication>({ bodyParser: false });
   configureApp(app, loadConfig(apiConfigSchema));
   await app.init();

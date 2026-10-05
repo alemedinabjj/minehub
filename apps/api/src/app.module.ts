@@ -9,7 +9,9 @@ import { GlobalExceptionFilter } from './common/errors/exception.filter.js';
 import { ConfigModule } from './config/config.module.js';
 import { DatabaseModule } from './database/database.module.js';
 import { HealthController } from './health/health.controller.js';
+import { QueueModule } from './queue/queue.module.js';
 import { RedisModule } from './redis/redis.module.js';
+import { ServersModule } from './servers/servers.module.js';
 
 const REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 const env = loadConfig(apiConfigSchema);
@@ -39,7 +41,9 @@ const env = loadConfig(apiConfigSchema);
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
     DatabaseModule,
     RedisModule,
+    QueueModule,
     AuthModule,
+    ServersModule,
   ],
   controllers: [HealthController],
   providers: [

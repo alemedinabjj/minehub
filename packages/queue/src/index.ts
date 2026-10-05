@@ -31,6 +31,13 @@ export const MAINTENANCE_JOB_NAMES = {
   idleDetection: 'maintenance.idle-detection',
 } as const;
 
+/**
+ * Redis pub/sub channel announcing that an operation was cancelled (superseded by a stop or
+ * delete). Published by the API after commit; the running handler aborts its signal.
+ * Handlers also poll ServerJob.status, so a lost message only delays the abort.
+ */
+export const cancelChannel = (operationId: string) => `hm:cancel:${operationId}`;
+
 export const queueForJob = (type: ServerJobType): QueueName => (type === 'CREATE' ? QUEUES.provisioning : QUEUES.lifecycle);
 
 /** Jobs carry identifiers only; handlers reload state from PostgreSQL. */

@@ -60,6 +60,20 @@ export const serverAddressSchema = z.object({
 });
 export type ServerAddress = z.infer<typeof serverAddressSchema>;
 
+/** `GET /servers`: cursor is opaque (from `meta.nextCursor`). */
+export const listServersQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z.string().max(64).regex(/^[A-Za-z0-9_-]+$/).optional(),
+});
+export type ListServersQuery = z.infer<typeof listServersQuerySchema>;
+
+/** `GET /servers/:id/events`: `after` is the last event id the client has seen. */
+export const listServerEventsQuerySchema = z.object({
+  after: z.uuid().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+export type ListServerEventsQuery = z.infer<typeof listServerEventsQuerySchema>;
+
 export const DEFAULT_MINECRAFT_PORT = 25565;
 
 export function formatServerAddress(address: ServerAddress): string {
