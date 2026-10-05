@@ -208,6 +208,8 @@ model ServerConfiguration {
   /// AES-256-GCM: version(1) | iv(12) | tag(16) | ciphertext. Never selected for API responses.
   rconPasswordEnc Bytes    @map("rcon_password_enc")
   revision        Int      @default(1)
+  /// Revision the current container was created with; revision > appliedRevision = restart required.
+  appliedRevision Int      @default(0) @map("applied_revision")
   updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)

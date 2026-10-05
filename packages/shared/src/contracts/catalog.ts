@@ -2,8 +2,8 @@ import { z } from 'zod';
 import { SOFTWARE } from '../domain/software.js';
 
 /**
- * Catalog API contracts. INTEGRATION POINT: these endpoints do not exist yet
- * (backend prompt). Clients must never hardcode versions or compatibility.
+ * Catalog API contracts, served by apps/api (catalog module) from the official upstream
+ * sources. Clients must never hardcode versions or compatibility.
  *
  *   GET /catalog/versions                       -> VersionCatalog
  *   GET /catalog/software?version=<id>          -> SoftwareCatalog
@@ -41,7 +41,8 @@ export const softwareCatalogSchema = z.object({
   data: z.array(softwareAvailabilitySchema).max(20),
 });
 
-export const MODPACK_CATEGORIES = ['popular', 'new', 'technology', 'adventure', 'rpg', 'exploration', 'optimization'] as const;
+/** `popular`/`new` are sort orders; the rest are Modrinth modpack categories. */
+export const MODPACK_CATEGORIES = ['popular', 'new', 'technology', 'adventure', 'magic', 'quests', 'optimization'] as const;
 export type ModpackCategory = (typeof MODPACK_CATEGORIES)[number];
 
 export const modpackRefSchema = z.object({
@@ -55,8 +56,8 @@ export const modpackSummarySchema = z.object({
   ref: modpackRefSchema,
   name: z.string().max(100),
   description: z.string().max(300),
-  /** Served via the backend/CDN allowlist; rendered with explicit size. */
-  iconUrl: z.url().nullable(),
+  /** Only https://cdn.modrinth.com icons pass the backend allowlist; rendered with explicit size. */
+  iconUrl: z.url().startsWith('https://cdn.modrinth.com/').nullable(),
   gameVersion: versionIdSchema,
   loader: z.enum(['FABRIC', 'FORGE', 'NEOFORGE']),
   modCount: z.number().int().nonnegative().nullable(),
@@ -64,6 +65,17 @@ export const modpackSummarySchema = z.object({
   categories: z.array(z.enum(MODPACK_CATEGORIES)).max(10),
 });
 export type ModpackSummary = z.infer<typeof modpackSummarySchema>;
+
+/** `GET /catalog/modpacks` query. `cursor` is opaque (from `meta.nextCursor`). */
+export const listModpacksQuerySchema = z.object({
+  version: versionIdSchema,
+  loader: z.enum(['FABRIC', 'FORGE', 'NEOFORGE']).optional(),
+  category: z.enum(MODPACK_CATEGORIES).default('popular'),
+  cursor: z.string().regex(/^[0-9]{1,4}$/).optional(),
+});
+export type ListModpacksQuery = z.infer<typeof listModpacksQuerySchema>;
+
+export const softwareQuerySchema = z.object({ version: versionIdSchema });
 
 export const modpackPageSchema = z.object({
   data: z.array(modpackSummarySchema).max(100),

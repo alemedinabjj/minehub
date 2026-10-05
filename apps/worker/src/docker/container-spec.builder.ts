@@ -25,6 +25,13 @@ export interface HostSettings {
 }
 
 const SECRET_ENV_KEYS = ['RCON_PASSWORD'];
+/**
+ * Bump whenever buildCreateOptions changes what it produces for the same spec (hardening,
+ * tmpfs, healthcheck...). It is part of the hash, so existing containers get recreated with
+ * the new options on their next start (data lives in the volume and is kept).
+ * 2: /tmp tmpfs mounted with `exec`.
+ */
+export const BUILDER_VERSION = 2;
 const NS = 1_000_000_000;
 
 /**
@@ -33,7 +40,7 @@ const NS = 1_000_000_000;
  */
 export function specHash(spec: ServerRuntimeSpec, host: HostSettings): string {
   const env = spec.env.filter((e) => !SECRET_ENV_KEYS.some((k) => e.startsWith(`${k}=`)));
-  return createHash('sha256').update(JSON.stringify({ ...spec, env, host })).digest('hex');
+  return createHash('sha256').update(JSON.stringify({ builder: BUILDER_VERSION, ...spec, env, host })).digest('hex');
 }
 
 /** Pure: spec → Docker create options. `assertSafeCreateOptions` must pass on the result. */
@@ -64,8 +71,9 @@ export function buildCreateOptions(spec: ServerRuntimeSpec, host: HostSettings):
       CapDrop: ['ALL'],
       SecurityOpt: ['no-new-privileges:true'],
       ReadonlyRootfs: spec.readOnlyRootfs,
-      // No noexec: the JVM and Netty extract native libraries into /tmp.
-      Tmpfs: { '/tmp': 'rw,nosuid,nodev,size=256m' },
+      // Explicit `exec`: Docker's tmpfs defaults to noexec, and the JVM/Netty load native
+      // libraries extracted into /tmp (without it Netty falls back to the slower NIO transport).
+      Tmpfs: { '/tmp': 'rw,exec,nosuid,nodev,size=256m' },
       Mounts: [{ Type: 'volume', Source: volumeName(spec.serverId), Target: '/data', ReadOnly: false }],
       Memory: spec.limits.memoryBytes,
       MemorySwap: spec.limits.memoryBytes,

@@ -20,6 +20,7 @@ export interface WorkerServer {
   lastStartedAt: Date | null;
   settings: WorldSettings;
   rconPasswordEnc: Uint8Array;
+  configRevision: number;
 }
 
 export class NodeCapacityError extends Error {
@@ -72,7 +73,7 @@ export class ServerOpsRepository {
   async load(serverId: string): Promise<WorkerServer | null> {
     const row = await this.prisma.server.findFirst({
       where: { id: serverId, deletedAt: null },
-      include: { configuration: { select: { properties: true, rconPasswordEnc: true } } },
+      include: { configuration: { select: { properties: true, rconPasswordEnc: true, revision: true } } },
     });
     if (!row) return null;
     if (!row.configuration) throw new InvalidStoredServerError('configuration');
@@ -97,6 +98,7 @@ export class ServerOpsRepository {
       lastStartedAt: row.lastStartedAt,
       settings: settings.data,
       rconPasswordEnc: row.configuration.rconPasswordEnc,
+      configRevision: row.configuration.revision,
     };
   }
 
@@ -136,6 +138,19 @@ export class ServerOpsRepository {
   /** DELETING → DELETED: soft delete; frees the slug and port (partial uniques ignore deleted rows). */
   async markDeleted(serverId: string, operationId: string): Promise<void> {
     await this.complete(serverId, operationId, ['DELETING'], 'DELETED', { deletedAt: new Date(), containerId: null });
+  }
+
+  /** The container now reflects `revision` of the configuration (clears "restart required"). */
+  async markConfigApplied(serverId: string, revision: number): Promise<void> {
+    await this.prisma.serverConfiguration.updateMany({ where: { serverId, appliedRevision: { lt: revision }, revision: { gte: revision } }, data: { appliedRevision: revision } });
+  }
+
+  /** Re-checks node memory before a (re)created container, e.g. after the owner raised its RAM. */
+  async assertCapacity(server: { id: string; heapMb: number; nodeId: string }, safeRatio: number): Promise<void> {
+    const node = await this.prisma.serverNode.findUniqueOrThrow({ where: { id: server.nodeId }, select: { totalMemoryMb: true } });
+    const others = await this.prisma.server.findMany({ where: { nodeId: server.nodeId, deletedAt: null, NOT: { id: server.id } }, select: { heapMb: true } });
+    const committed = others.reduce((sum, s) => sum + s.heapMb + memoryOverheadMb(s.heapMb), 0);
+    if (committed + server.heapMb + memoryOverheadMb(server.heapMb) > node.totalMemoryMb * safeRatio) throw new NodeCapacityError();
   }
 
   async setContainerId(serverId: string, containerId: string): Promise<void> {

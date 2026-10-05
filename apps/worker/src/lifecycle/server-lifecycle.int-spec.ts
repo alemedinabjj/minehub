@@ -7,6 +7,7 @@ import { DelayedError, UnrecoverableError, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
 import { pino } from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { ServerCommands } from '../commands/server-commands.js';
 import { DockerUnavailableError } from '../docker/container-runtime.js';
 import { CancellationHub } from '../locks/cancellation.js';
 import { ServerLocks } from '../locks/server-lock.js';
@@ -351,5 +352,74 @@ describe('coordination', () => {
   it('rejects a malformed payload permanently', async () => {
     const job = jobFor('START', 'not-a-uuid', randomUUID());
     await expect(run(job)).rejects.toThrow(UnrecoverableError);
+  });
+});
+
+describe('panel: settings changes and commands', () => {
+  async function onlineServer() {
+    const { serverId, operationId } = await givenServer('CREATING', 'CREATE');
+    await run(jobFor('CREATE', serverId, operationId));
+    return serverId;
+  }
+  const commands = () => new ServerCommands(db, runtime, log);
+
+  it('marks the configuration applied when the container is created', async () => {
+    const serverId = await onlineServer();
+    expect(await db.serverConfiguration.findUniqueOrThrow({ where: { serverId } })).toMatchObject({ revision: 1, appliedRevision: 1 });
+  });
+
+  it('recreates the container with new settings on the next start and clears restart-required', async () => {
+    const serverId = await onlineServer();
+    const before = runtime.containers.get(serverId)!.containerId;
+    await db.serverConfiguration.update({ where: { serverId }, data: { properties: { ...WORLD_PRESETS.SURVIVAL.settings, pvp: false, onlineMode: false }, revision: { increment: 1 } } });
+    await run(jobFor('STOP', serverId, await nextOperation(serverId, 'STOPPING', 'STOP')));
+    await run(jobFor('START', serverId, await nextOperation(serverId, 'STARTING', 'START')));
+    const container = runtime.containers.get(serverId)!;
+    expect(container.containerId).not.toBe(before);
+    expect(container.spec.env).toEqual(expect.arrayContaining(['PVP=false', 'ONLINE_MODE=false', 'ENFORCE_SECURE_PROFILE=false']));
+    expect(await db.serverConfiguration.findUniqueOrThrow({ where: { serverId } })).toMatchObject({ revision: 2, appliedRevision: 2 });
+  });
+
+  it('refuses to recreate with more RAM than the node has', async () => {
+    const serverId = await onlineServer();
+    await db.serverNode.update({ where: { name: NODE }, data: { totalMemoryMb: 4000 } });
+    await db.server.update({ where: { id: serverId }, data: { heapMb: 8192 } });
+    await run(jobFor('STOP', serverId, await nextOperation(serverId, 'STOPPING', 'STOP')));
+    const op = await nextOperation(serverId, 'STARTING', 'START');
+    await expect(run(jobFor('START', serverId, op))).rejects.toThrow(UnrecoverableError);
+    expect(await opRow(op)).toMatchObject({ status: 'FAILED', errorCode: 'NODE_CAPACITY' });
+  });
+
+  it('runs an RCON command as a single argv element through rcon-cli', async () => {
+    const serverId = await onlineServer();
+    runtime.rconReplies.set('say oi; rm -rf /', 'ok');
+    const res = await commands().handle({ kind: 'rcon', serverId, command: '/say oi; rm -rf /' });
+    expect(res).toEqual({ ok: true, data: { output: 'ok' } });
+    expect(runtime.execCalls.at(-1)).toEqual(['rcon-cli', 'say oi; rm -rf /']);
+  });
+
+  it('lists players, reads logs and samples stats', async () => {
+    const serverId = await onlineServer();
+    expect(await commands().handle({ kind: 'players', serverId })).toEqual({ ok: true, data: { online: 2, max: 10, players: ['Steve', 'Alex'] } });
+    expect(await commands().handle({ kind: 'logs', serverId, tail: 50 })).toMatchObject({ ok: true, data: { lines: [expect.stringContaining('Done')] } });
+    expect(await commands().handle({ kind: 'stats', serverId })).toMatchObject({ ok: true, data: { memoryLimitMb: 2560 } });
+  });
+
+  it('refuses RCON while the server is not online, and logs for a server without container are empty', async () => {
+    const { serverId } = await givenServer('STOPPED', 'START', { placed: true });
+    expect(await commands().handle({ kind: 'rcon', serverId, command: 'list' })).toEqual({ ok: false, error: 'SERVER_NOT_RUNNING' });
+    expect(await commands().handle({ kind: 'logs', serverId, tail: 10 })).toEqual({ ok: true, data: { lines: [] } });
+  });
+
+  it.each([
+    ['a flag for rcon-cli', { kind: 'rcon', command: '--host evil' }],
+    ['a newline injection', { kind: 'rcon', command: 'say a\nop Evil' }],
+    ['an unknown kind', { kind: 'shell', command: 'id' }],
+    ['a huge tail', { kind: 'logs', tail: 100000 }],
+  ])('rejects %s without touching Docker', async (_, payload) => {
+    const serverId = await onlineServer();
+    const calls = runtime.execCalls.length;
+    expect(await commands().handle({ serverId, ...payload })).toEqual({ ok: false, error: 'COMMAND_FAILED' });
+    expect(runtime.execCalls.length).toBe(calls);
   });
 });

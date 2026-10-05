@@ -67,6 +67,8 @@ export function assertSafeCreateOptions(o: ContainerCreateOptions): void {
   const m = h.Mounts[0]!;
   must(m.Type === 'volume' && m.Target === '/data' && m.Source === volumeName(serverId) && !m.VolumeOptions?.DriverConfig, 'mount');
   must(sameSet(Object.keys(h.Tmpfs ?? {}), ['/tmp']), 'tmpfs');
+  const tmpOpts = (h.Tmpfs?.['/tmp'] ?? '').split(',');
+  must(tmpOpts.includes('nosuid') && tmpOpts.includes('nodev') && tmpOpts.some((o) => /^size=\d+[km]$/.test(o)), 'tmpfs options');
   must(h.LogConfig?.Type === 'local' && !!h.LogConfig.Config?.['max-size'], 'log rotation');
   must(h.BlkioWeight === undefined || (Number.isInteger(h.BlkioWeight) && h.BlkioWeight >= 10 && h.BlkioWeight <= 1000), 'io weight');
 }

@@ -31,7 +31,7 @@ export class EnvMappingError extends Error {
 export const ENV_ALLOWLIST = new Set([
   'EULA', 'TYPE', 'VERSION', 'MEMORY', 'ENABLE_RCON', 'RCON_PASSWORD', 'MOTD',
   'MODE', 'DIFFICULTY', 'PVP', 'HARDCORE', 'ENABLE_WHITELIST', 'ONLINE_MODE',
-  'VIEW_DISTANCE', 'SIMULATION_DISTANCE', 'MAX_PLAYERS', 'SEED',
+  'VIEW_DISTANCE', 'SIMULATION_DISTANCE', 'MAX_PLAYERS', 'SEED', 'ENFORCE_SECURE_PROFILE',
   'FABRIC_LOADER_VERSION', 'FORGE_VERSION', 'NEOFORGE_VERSION',
   'MODRINTH_MODPACK', 'MODRINTH_VERSION', 'MODRINTH_LOADER',
 ]);
@@ -69,6 +69,9 @@ export function buildEnv(spec: MinecraftServerSpec): string[] {
     MAX_PLAYERS: int(s.maxPlayers, 1, 500, 'MAX_PLAYERS'),
   };
   if (s.seed) env.SEED = token(s.seed, 'SEED');
+  // Non-original accounts (TLauncher and other launchers without a Microsoft login) have no
+  // signed profile keys; 1.19+ would kick them under enforce-secure-profile.
+  if (!s.onlineMode) env.ENFORCE_SECURE_PROFILE = 'false';
 
   if (spec.modpack) {
     if (!isModLoader(spec.software)) throw new EnvMappingError('MODPACK_REQUIRES_LOADER');

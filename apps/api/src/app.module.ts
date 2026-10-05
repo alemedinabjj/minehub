@@ -5,6 +5,7 @@ import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { apiConfigSchema, loadConfig } from '@hubmine/config';
 import { LoggerModule } from 'nestjs-pino';
 import { AuthModule } from './auth/auth.module.js';
+import { CatalogModule } from './catalog/catalog.module.js';
 import { GlobalExceptionFilter } from './common/errors/exception.filter.js';
 import { ConfigModule } from './config/config.module.js';
 import { DatabaseModule } from './database/database.module.js';
@@ -43,6 +44,7 @@ const env = loadConfig(apiConfigSchema);
     RedisModule,
     QueueModule,
     AuthModule,
+    CatalogModule,
     ServersModule,
   ],
   controllers: [HealthController],

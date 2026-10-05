@@ -1,9 +1,10 @@
 import { ConfigError, loadConfig, redisConnectionFromUrl, workerConfigSchema } from '@hubmine/config';
 import { createPrismaClient, SecretBox } from '@hubmine/database';
-import { MAINTENANCE_JOB_NAMES, QUEUES, type QueueName } from '@hubmine/queue';
+import { COMMAND_QUEUE, MAINTENANCE_JOB_NAMES, QUEUES, type QueueName } from '@hubmine/queue';
 import { Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { ServerCommands } from './commands/server-commands.js';
 import { DockerodeRuntime } from './docker/dockerode.runtime.js';
 import { DEFAULT_TIMINGS, ServerLifecycle } from './lifecycle/server-lifecycle.js';
 import { ServerOpsRepository } from './lifecycle/server-ops.repository.js';
@@ -54,7 +55,10 @@ async function main() {
     log,
   });
   const serverJobs = createServerJobProcessor({ lifecycle, repo, locks: new ServerLocks(redis), cancellation, log });
+  const commands = new ServerCommands(prisma, runtime, log);
   const workers = [
+    // Interactive panel commands: the API awaits the return value; never retried.
+    new Worker(COMMAND_QUEUE, (job) => commands.handle(job.data), { connection, concurrency: 8 }),
     new Worker(QUEUES.provisioning, serverJobs, { connection, concurrency: config.PROVISIONING_CONCURRENCY, lockDuration: 60_000 }),
     new Worker(QUEUES.lifecycle, serverJobs, { connection, concurrency: config.LIFECYCLE_CONCURRENCY, lockDuration: 60_000 }),
     new Worker(

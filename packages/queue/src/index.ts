@@ -71,3 +71,32 @@ export function jobOptionsFor(type: ServerJobType, operationId: string): ServerJ
     removeOnFail: { age: 14 * 24 * 3600 },
   };
 }
+
+/**
+ * Interactive panel commands (console, logs, players, stats). Unlike lifecycle operations
+ * these are short reads/RCON calls the API awaits with a timeout (request/reply over BullMQ),
+ * because only the worker may touch Docker. Never retried: a stale console command must not
+ * run twice.
+ */
+export const COMMAND_QUEUE = 'server-commands';
+export const COMMAND_JOB_NAME = 'server.command';
+export const COMMAND_TIMEOUT_MS = 10_000;
+
+const commandText = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[^\u0000-\u001f\u007f-][^\u0000-\u001f\u007f]*$/);
+
+export const serverCommandSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('rcon'), serverId: z.uuid(), command: commandText }),
+  z.object({ kind: z.literal('logs'), serverId: z.uuid(), tail: z.number().int().min(1).max(500) }),
+  z.object({ kind: z.literal('players'), serverId: z.uuid() }),
+  z.object({ kind: z.literal('stats'), serverId: z.uuid() }),
+]);
+export type ServerCommand = z.infer<typeof serverCommandSchema>;
+
+/** Worker reply. `error` carries a stable code the API maps to a user-safe message. */
+export type ServerCommandResult =
+  | { ok: true; data: unknown }
+  | { ok: false; error: 'SERVER_NOT_RUNNING' | 'SERVER_NOT_FOUND' | 'COMMAND_FAILED' | 'DOCKER_UNAVAILABLE' };

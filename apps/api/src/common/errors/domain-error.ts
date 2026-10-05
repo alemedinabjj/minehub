@@ -38,4 +38,18 @@ export const Errors = {
     new DomainError('SERVER_QUOTA_EXCEEDED', HttpStatus.FORBIDDEN, `Você atingiu o limite de ${max} servidores.`, [{ max }]),
   invalidSoftwareCombination: (code: string) =>
     new DomainError('INVALID_SOFTWARE_COMBINATION', HttpStatus.UNPROCESSABLE_ENTITY, 'Essa combinação de software não é suportada.', [{ code }]),
+  versionNotAvailable: () => new DomainError('VERSION_NOT_AVAILABLE', HttpStatus.UNPROCESSABLE_ENTITY, 'Essa versão do Minecraft não está disponível.'),
+  softwareNotAvailable: () =>
+    new DomainError('SOFTWARE_NOT_AVAILABLE', HttpStatus.UNPROCESSABLE_ENTITY, 'Esse tipo de servidor não está disponível para essa versão.'),
+  loaderVersionNotAvailable: () =>
+    new DomainError('LOADER_VERSION_NOT_AVAILABLE', HttpStatus.UNPROCESSABLE_ENTITY, 'Essa versão do loader não está disponível.'),
+  modpackNotAvailable: () =>
+    new DomainError('MODPACK_NOT_AVAILABLE', HttpStatus.UNPROCESSABLE_ENTITY, 'Esse modpack não está disponível para essa versão.'),
+  catalogUnavailable: () =>
+    new DomainError('CATALOG_UNAVAILABLE', HttpStatus.SERVICE_UNAVAILABLE, 'Não conseguimos consultar as versões agora. Tente de novo em instantes.'),
+  serverNotRunning: () => new DomainError('SERVER_NOT_RUNNING', HttpStatus.CONFLICT, 'O servidor precisa estar online para isso.'),
+  commandFailed: () => new DomainError('COMMAND_FAILED', HttpStatus.UNPROCESSABLE_ENTITY, 'O comando não pôde ser executado.'),
+  commandTimeout: () => new DomainError('COMMAND_TIMEOUT', HttpStatus.SERVICE_UNAVAILABLE, 'O servidor demorou para responder. Tente de novo.'),
+  dockerUnavailable: () => new DomainError('DOCKER_UNAVAILABLE', HttpStatus.SERVICE_UNAVAILABLE, 'A máquina do servidor não está respondendo agora.'),
+  serverBusy: () => new DomainError('SERVER_INVALID_TRANSITION', HttpStatus.CONFLICT, 'Esse servidor está sendo excluído.'),
 } as const;

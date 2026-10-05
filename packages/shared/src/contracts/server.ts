@@ -141,3 +141,93 @@ export const apiErrorSchema = z.object({
   requestId: z.string().optional(),
 });
 export type ApiError = z.infer<typeof apiErrorSchema>;
+
+/* ------------------------------------------------------------------------------------------
+ * Server panel (management) contracts.
+ *
+ *   GET   /servers/:id/details                 -> { data: ServerDetails }
+ *   PATCH /servers/:id                         -> { data: ServerDetails }   (applies on next start)
+ *   POST  /servers/:id/console                 -> { data: ConsoleResult }   (RCON, ONLINE only)
+ *   GET   /servers/:id/logs?tail=              -> { data: ServerLogs }
+ *   GET   /servers/:id/players                 -> { data: ServerPlayers }   (ONLINE only)
+ *   POST  /servers/:id/players/actions         -> { data: ConsoleResult }
+ *   GET   /servers/:id/stats                   -> { data: ServerStats }     (ONLINE only)
+ * ---------------------------------------------------------------------------------------- */
+
+/** Minecraft player name. Offline-mode (TLauncher) names follow the same vanilla rule. */
+export const playerNameSchema = z.string().regex(/^[A-Za-z0-9_]{1,16}$/, 'PLAYER_NAME_INVALID');
+
+export const updateServerRequestSchema = z
+  .object({
+    name: worldNameSchema.optional(),
+    heapMb: z.number().int().min(RESOURCE_LIMITS.heapMb.min).max(RESOURCE_LIMITS.heapMb.max).multipleOf(RESOURCE_LIMITS.heapMb.step).optional(),
+    settings: worldSettingsSchema.partial().strict().optional(),
+  })
+  .refine((v) => v.name !== undefined || v.heapMb !== undefined || (v.settings && Object.keys(v.settings).length > 0), 'NOTHING_TO_UPDATE');
+export type UpdateServerRequest = z.infer<typeof updateServerRequestSchema>;
+
+export const serverDetailsSchema = serverSummarySchema.extend({
+  worldType: z.enum(WORLD_TYPES),
+  players: z.enum(PLAYER_BUCKETS),
+  loaderVersion: z.string().max(32).nullable(),
+  modpack: modpackRefSchema.nullable(),
+  heapMb: z.number().int(),
+  cpuMillis: z.number().int(),
+  settings: worldSettingsSchema,
+  /** Saved settings differ from what the running container was created with. */
+  restartRequired: z.boolean(),
+  createdAt: z.iso.datetime(),
+  lastStartedAt: z.iso.datetime().nullable(),
+});
+export type ServerDetails = z.infer<typeof serverDetailsSchema>;
+
+/** One console line: bounded, printable. Rendered as text, never HTML. */
+export const CONSOLE_COMMAND_MAX = 256;
+export const consoleCommandRequestSchema = z.object({
+  command: z
+    .string()
+    .trim()
+    .min(1, 'COMMAND_REQUIRED')
+    .max(CONSOLE_COMMAND_MAX, 'COMMAND_TOO_LONG')
+    // No control characters; no leading "-" (would be read as an rcon-cli flag).
+    .regex(/^[^\u0000-\u001f\u007f-][^\u0000-\u001f\u007f]*$/, 'COMMAND_INVALID'),
+});
+export type ConsoleCommandRequest = z.infer<typeof consoleCommandRequestSchema>;
+
+export const consoleResultSchema = z.object({ output: z.string().max(8192) });
+export type ConsoleResult = z.infer<typeof consoleResultSchema>;
+
+export const serverLogsQuerySchema = z.object({ tail: z.coerce.number().int().min(1).max(500).default(200) });
+export const serverLogsSchema = z.object({ lines: z.array(z.string().max(4096)).max(500) });
+export type ServerLogs = z.infer<typeof serverLogsSchema>;
+
+export const serverPlayersSchema = z.object({
+  online: z.number().int().nonnegative(),
+  max: z.number().int().nonnegative(),
+  players: z.array(z.string().max(32)).max(500),
+});
+export type ServerPlayers = z.infer<typeof serverPlayersSchema>;
+
+export const PLAYER_ACTIONS = ['kick', 'ban', 'pardon', 'op', 'deop', 'whitelist_add', 'whitelist_remove'] as const;
+export type PlayerAction = (typeof PLAYER_ACTIONS)[number];
+export const playerActionRequestSchema = z.object({ action: z.enum(PLAYER_ACTIONS), player: playerNameSchema });
+export type PlayerActionRequest = z.infer<typeof playerActionRequestSchema>;
+
+/** Built on the server from validated parts; clients never compose these strings. */
+export function playerActionCommand({ action, player }: PlayerActionRequest): string {
+  switch (action) {
+    case 'whitelist_add':
+      return `whitelist add ${player}`;
+    case 'whitelist_remove':
+      return `whitelist remove ${player}`;
+    default:
+      return `${action} ${player}`;
+  }
+}
+
+export const serverStatsSchema = z.object({
+  memoryUsedMb: z.number().nonnegative(),
+  memoryLimitMb: z.number().nonnegative(),
+  cpuPercent: z.number().nonnegative(),
+});
+export type ServerStats = z.infer<typeof serverStatsSchema>;

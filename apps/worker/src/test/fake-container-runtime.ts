@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { assertSafeCreateOptions } from '../docker/container-policy.js';
-import { ContainerNotFoundError, ContainerSpecDriftError, type ContainerRuntime, type ObservedContainer } from '../docker/container-runtime.js';
+import { ContainerNotFoundError, ContainerNotRunningError, ContainerSpecDriftError, type ContainerRuntime, type ObservedContainer } from '../docker/container-runtime.js';
 import { buildCreateOptions, specHash, type HostSettings, type ServerRuntimeSpec } from '../docker/container-spec.builder.js';
 import { LABELS } from '../docker/names.js';
 
@@ -28,6 +28,10 @@ export class FakeContainerRuntime implements ContainerRuntime {
   readonly images = new Set<string>();
   readonly calls: string[] = [];
   bootBehavior: BootBehavior = 'healthy';
+  /** Scripted RCON replies by command; anything else answers with an "Unknown command" line. */
+  rconReplies = new Map<string, string>([['list', 'There are 2 of a max of 10 players online: Steve, Alex']]);
+  readonly execCalls: string[][] = [];
+  logLines: string[] = ['[Server thread/INFO]: Done (3.2s)! For help, type "help"'];
   private readonly failures = new Map<string, Error[]>();
 
   constructor(private readonly host: HostSettings = { uid: 1000, gid: 1000, bindIp: '127.0.0.1' }) {}
@@ -117,5 +121,27 @@ export class FakeContainerRuntime implements ContainerRuntime {
     const c = this.containers.get(serverId);
     if (!c) return { exists: false };
     return { exists: true, containerId: c.containerId, running: c.running, exitCode: c.exitCode, oomKilled: c.oomKilled, health: c.health, specHash: c.specHash };
+  }
+
+  async exec(serverId: string, argv: readonly string[]) {
+    this.hit('exec', serverId);
+    const c = this.containers.get(serverId);
+    if (!c) throw new ContainerNotFoundError();
+    if (!c.running) throw new ContainerNotRunningError();
+    this.execCalls.push([...argv]);
+    const command = argv[0] === 'rcon-cli' ? argv.slice(1).join(' ') : '';
+    return { exitCode: 0, output: this.rconReplies.get(command) ?? `Unknown command: ${command}` };
+  }
+
+  async logs(serverId: string, opts: { tail: number }) {
+    this.hit('logs', serverId);
+    if (!this.containers.has(serverId)) throw new ContainerNotFoundError();
+    return this.logLines.slice(-opts.tail);
+  }
+
+  async stats(serverId: string) {
+    this.hit('stats', serverId);
+    if (!this.containers.get(serverId)?.running) throw new ContainerNotRunningError();
+    return { memoryUsedMb: 1500, memoryLimitMb: 2560, cpuPercent: 12.5 };
   }
 }

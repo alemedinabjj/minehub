@@ -34,6 +34,23 @@ export interface ContainerRuntime {
   inspect(serverId: string): Promise<ObservedContainer>;
   /** The hash `create` would label this spec with (to detect a container that needs recreating). */
   hashOf(spec: ServerRuntimeSpec): string;
+  /** argv only (never a shell), as the container's non-root user, bounded in time and output. */
+  exec(serverId: string, argv: readonly string[], opts: { timeoutMs: number }): Promise<ExecResult>;
+  /** Last `tail` lines (stdout+stderr), sanitized. Never follows: bounded read. */
+  logs(serverId: string, opts: { tail: number }): Promise<string[]>;
+  /** One-shot resource sample of a running container. */
+  stats(serverId: string): Promise<ContainerStats>;
+}
+
+export interface ExecResult {
+  exitCode: number | null;
+  output: string;
+}
+
+export interface ContainerStats {
+  memoryUsedMb: number;
+  memoryLimitMb: number;
+  cpuPercent: number;
 }
 
 /** Retryable: the daemon is down or unreachable. Never means "the container is dead". */
@@ -70,5 +87,19 @@ export class ImagePullError extends Error {
   constructor(cause?: unknown) {
     super('image pull failed', { cause });
     this.name = 'ImagePullError';
+  }
+}
+
+export class ContainerNotRunningError extends Error {
+  constructor() {
+    super('container is not running');
+    this.name = 'ContainerNotRunningError';
+  }
+}
+
+export class ExecTimeoutError extends Error {
+  constructor() {
+    super('exec timed out');
+    this.name = 'ExecTimeoutError';
   }
 }

@@ -113,6 +113,56 @@ export class ServersRepository {
     });
   }
 
+  findDetails(userId: string, serverId: string) {
+    return this.prisma.server.findFirst({
+      where: { id: serverId, ...accessible(userId, ALL_ROLES) },
+      select: {
+        ...serverSelect,
+        worldType: true,
+        players: true,
+        loaderVersion: true,
+        modpackRef: true,
+        heapMb: true,
+        cpuMillis: true,
+        lastStartedAt: true,
+        configuration: { select: { properties: true, revision: true, appliedRevision: true } },
+      },
+    });
+  }
+
+  /**
+   * Saves panel edits (name/slug, heap, merged settings) and bumps the configuration revision
+   * in one transaction. Nothing touches Docker: the worker applies it on the next (re)start.
+   */
+  async updateSettings(args: {
+    userId: string;
+    roles: ServerRole[];
+    serverId: string;
+    name?: { name: string; slug: string };
+    heapMb?: number;
+    properties?: Prisma.InputJsonValue;
+  }): Promise<boolean> {
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const where = { id: args.serverId, ...accessible(args.userId, args.roles), status: { notIn: ['DELETING', 'DELETED'] as ServerStatus[] } };
+        const { count } = await tx.server.updateMany({
+          where,
+          data: { ...(args.name ? { name: args.name.name, slug: args.name.slug } : {}), ...(args.heapMb !== undefined ? { heapMb: args.heapMb } : {}) },
+        });
+        if (count === 0) return false;
+        await tx.serverConfiguration.update({
+          where: { serverId: args.serverId },
+          data: { ...(args.properties !== undefined ? { properties: args.properties } : {}), revision: { increment: 1 } },
+        });
+        await tx.serverEvent.create({ data: { serverId: args.serverId, type: 'SETTINGS_UPDATED', actorType: 'USER', actorId: args.userId } });
+        return true;
+      });
+    } catch (err) {
+      if (isUniqueViolation(err, 'servers_owner_slug_live_key')) throw Errors.serverNameInUse();
+      throw err;
+    }
+  }
+
   /** Outbox step 2: the job reached Redis. Conditional so a fast worker's RUNNING is never overwritten. */
   async markQueued(operationId: string): Promise<void> {
     await this.prisma.serverJob.updateMany({ where: { id: operationId, status: 'PENDING' }, data: { status: 'QUEUED' } });

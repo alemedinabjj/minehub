@@ -74,6 +74,7 @@ describe('buildCreateOptions', () => {
     });
     expect(o.HostConfig?.MemorySwap).toBe(o.HostConfig?.Memory);
     expect(o.HostConfig?.BlkioWeight).toBe(300);
+    expect(o.HostConfig?.Tmpfs).toEqual({ '/tmp': 'rw,exec,nosuid,nodev,size=256m' });
   });
 
   it('omits the IO weight where the host cannot enforce it', () => {
@@ -136,6 +137,9 @@ const VIOLATIONS: [string, Mutation][] = [
   ['non-uuid label', (o) => void (o.Labels![`com.hubmine.server-id`] = '../x')],
   ['extra label', (o) => void (o.Labels!['traefik.enable'] = 'true')],
   ['tty', (o) => void (o.Tty = true)],
+  ['tmpfs without nosuid', (o) => void (hc(o).Tmpfs = { '/tmp': 'rw,exec,size=256m' })],
+  ['unbounded tmpfs', (o) => void (hc(o).Tmpfs = { '/tmp': 'rw,exec,nosuid,nodev' })],
+  ['extra tmpfs mount', (o) => void (hc(o).Tmpfs = { '/tmp': 'rw,exec,nosuid,nodev,size=256m', '/data': 'rw' })],
   ['out-of-range io weight', (o) => void (hc(o).BlkioWeight = 5000)],
 ];
 

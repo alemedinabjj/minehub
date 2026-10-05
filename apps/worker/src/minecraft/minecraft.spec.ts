@@ -66,6 +66,12 @@ describe('buildEnv', () => {
     expect(env).toEqual([...env].sort());
   });
 
+  it('lets non-original accounts (TLauncher) in when online mode is off', () => {
+    const env = asMap(buildEnv(spec({ settings: { ...WORLD_PRESETS.SURVIVAL.settings, onlineMode: false } })));
+    expect(env).toMatchObject({ ONLINE_MODE: 'false', ENFORCE_SECURE_PROFILE: 'false' });
+    expect(asMap(buildEnv(spec()))).not.toHaveProperty('ENFORCE_SECURE_PROFILE');
+  });
+
   it('requires recorded EULA consent', () => {
     expect(() => buildEnv(spec({ eulaAcceptedAt: null }))).toThrow(EnvMappingError);
   });

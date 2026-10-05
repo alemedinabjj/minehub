@@ -13,6 +13,7 @@ import {
   type ServerSummary,
 } from '@hubmine/shared';
 import type { Redis } from 'ioredis';
+import { CatalogService } from '../catalog/catalog.service.js';
 import { Errors } from '../common/errors/domain-error.js';
 import { SERVER_JOB_QUEUE, type ServerJobQueue } from '../queue/queue.module.js';
 import { REDIS } from '../redis/redis.module.js';
@@ -52,6 +53,7 @@ export class ServersService {
   constructor(
     private readonly repo: ServersRepository,
     private readonly secrets: SecretBox,
+    private readonly catalog: CatalogService,
     @Inject(SERVER_JOB_QUEUE) private readonly queue: ServerJobQueue,
     @Inject(REDIS) private readonly redis: Redis,
   ) {}
@@ -60,6 +62,7 @@ export class ServersService {
     const loader = isModLoader(input.software);
     if (input.modpack && !loader) throw Errors.invalidSoftwareCombination('MODPACK_REQUIRES_LOADER');
     if (input.loaderVersion && !loader) throw Errors.invalidSoftwareCombination('LOADER_VERSION_REQUIRES_LOADER');
+    await this.catalog.assertCreatable(input);
 
     // CPU is never client-chosen: it follows the same recommendation the UI showed.
     const { cpuMillis } = recommendResources({ software: input.software, modpack: input.modpack ? {} : null, players: input.players });

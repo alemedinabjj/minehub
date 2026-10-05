@@ -1,16 +1,25 @@
 import Docker from 'dockerode';
 import { assertSafeCreateOptions } from './container-policy.js';
+import { PassThrough } from 'node:stream';
 import {
   ContainerNotFoundError,
+  ContainerNotRunningError,
   ContainerSpecDriftError,
+  ExecTimeoutError,
   DockerUnavailableError,
   ImagePullError,
   InsecureDaemonError,
   type ContainerRuntime,
+  type ContainerStats,
+  type ExecResult,
   type ObservedContainer,
 } from './container-runtime.js';
 import { buildCreateOptions, specHash, type HostSettings, type ServerRuntimeSpec } from './container-spec.builder.js';
 import { containerName, LABELS, MINECRAFT_NETWORK, volumeName } from './names.js';
+import { demuxDockerStream, sanitizeLine } from './output.js';
+
+const MAX_EXEC_OUTPUT = 64 * 1024;
+const MB = 1024 * 1024;
 
 const statusOf = (err: unknown) => (err as { statusCode?: number } | null)?.statusCode;
 const NETWORK_ERRORS = new Set(['ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'EACCES']);
@@ -178,6 +187,86 @@ export class DockerodeRuntime implements ContainerRuntime {
       oomKilled: info.State.OOMKilled,
       health: health === 'healthy' || health === 'unhealthy' || health === 'starting' ? health : 'none',
       specHash: info.Config.Labels?.[LABELS.specHash] ?? null,
+    };
+  }
+
+  async exec(serverId: string, argv: readonly string[], opts: { timeoutMs: number }): Promise<ExecResult> {
+    if (argv.length === 0 || argv.some((a) => typeof a !== 'string' || a.includes('\0'))) throw new Error('invalid argv');
+    const container = this.docker.getContainer(containerName(serverId));
+    let exec: Docker.Exec;
+    try {
+      exec = await container.exec({
+        Cmd: [...argv],
+        AttachStdout: true,
+        AttachStderr: true,
+        AttachStdin: false,
+        Tty: false,
+        Privileged: false,
+        User: `${this.host.uid}:${this.host.gid}`,
+      });
+    } catch (err) {
+      if (statusOf(err) === 404) throw new ContainerNotFoundError();
+      if (statusOf(err) === 409) throw new ContainerNotRunningError();
+      translate(err);
+    }
+    const stream = await exec.start({ hijack: true, stdin: false }).catch(translate);
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const sink = new PassThrough();
+    sink.on('data', (c: Buffer) => {
+      if (size < MAX_EXEC_OUTPUT) chunks.push(c);
+      size += c.length;
+    });
+    this.docker.modem.demuxStream(stream, sink, sink);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        stream.destroy();
+        reject(new ExecTimeoutError());
+      }, opts.timeoutMs);
+      stream.on('end', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      stream.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+    const { ExitCode } = await exec.inspect().catch(translate);
+    return { exitCode: ExitCode ?? null, output: Buffer.concat(chunks).toString('utf8').slice(0, MAX_EXEC_OUTPUT) };
+  }
+
+  async logs(serverId: string, opts: { tail: number }): Promise<string[]> {
+    let raw: Buffer;
+    try {
+      raw = (await this.docker.getContainer(containerName(serverId)).logs({ stdout: true, stderr: true, follow: false, tail: opts.tail, timestamps: false })) as unknown as Buffer;
+    } catch (err) {
+      if (statusOf(err) === 404) throw new ContainerNotFoundError();
+      translate(err);
+    }
+    return demuxDockerStream(Buffer.from(raw))
+      .split(/\r?\n/)
+      .filter((l) => l.length > 0)
+      .slice(-opts.tail)
+      .map(sanitizeLine);
+  }
+
+  async stats(serverId: string): Promise<ContainerStats> {
+    let s: Docker.ContainerStats;
+    try {
+      s = await this.docker.getContainer(containerName(serverId)).stats({ stream: false });
+    } catch (err) {
+      if (statusOf(err) === 404) throw new ContainerNotFoundError();
+      translate(err);
+    }
+    const cpuDelta = s.cpu_stats.cpu_usage.total_usage - s.precpu_stats.cpu_usage.total_usage;
+    const systemDelta = (s.cpu_stats.system_cpu_usage ?? 0) - (s.precpu_stats.system_cpu_usage ?? 0);
+    const cpus = s.cpu_stats.online_cpus || s.cpu_stats.cpu_usage.percpu_usage?.length || 1;
+    const cache = (s.memory_stats.stats as Record<string, number> | undefined)?.inactive_file ?? 0;
+    return {
+      memoryUsedMb: Math.max(0, Math.round(((s.memory_stats.usage ?? 0) - cache) / MB)),
+      memoryLimitMb: Math.round((s.memory_stats.limit ?? 0) / MB),
+      cpuPercent: systemDelta > 0 && cpuDelta > 0 ? Math.round((cpuDelta / systemDelta) * cpus * 1000) / 10 : 0,
     };
   }
 }

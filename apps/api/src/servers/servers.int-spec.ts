@@ -5,7 +5,9 @@ import type { ServerJobPayload, ServerJobType } from '@hubmine/queue';
 import { WORLD_PRESETS, type CreateServerRequest } from '@hubmine/shared';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { CATALOG_CACHE_PREFIX, CATALOG_FETCHER } from '../catalog/catalog.service.js';
 import { SERVER_JOB_QUEUE, type ServerJobQueue } from '../queue/queue.module.js';
+import { fixtureFetcher, MODPACK_FIXTURE, testCachePrefix } from '../test/catalog-fixtures.js';
 import { createTestApp } from '../test/test-app.js';
 import { MAX_SERVERS_PER_USER } from './servers.service.js';
 
@@ -80,7 +82,13 @@ const jobsOf = (serverId: string, status?: ServerJobStatus[]) =>
 
 beforeAll(async () => {
   process.env.TRUST_PROXY_HOPS = '1';
-  ({ app, close } = await createTestApp({ overrides: [{ token: SERVER_JOB_QUEUE, value: queue }] }));
+  ({ app, close } = await createTestApp({
+    overrides: [
+      { token: SERVER_JOB_QUEUE, value: queue },
+      { token: CATALOG_FETCHER, value: fixtureFetcher() },
+      { token: CATALOG_CACHE_PREFIX, value: testCachePrefix() },
+    ],
+  }));
   db = createPrismaClient({ connectionString: process.env.DATABASE_URL! });
 });
 afterAll(async () => {
@@ -153,6 +161,25 @@ describe('POST /servers', () => {
       .send(validBody({ modpack: { source: 'MODRINTH', projectId: 'abc', versionId: 'def' } }))
       .expect(422);
     expect(res.body.error.code).toBe('INVALID_SOFTWARE_COMBINATION');
+  });
+
+  it.each([
+    ['a version that is not a release', { minecraftVersion: '9.9.9' }, 'VERSION_NOT_AVAILABLE'],
+    ['software not built for the version', { minecraftVersion: '1.21.1', software: 'FORGE' as const }, 'SOFTWARE_NOT_AVAILABLE'],
+    ['an unknown loader version', { minecraftVersion: '1.21.1', software: 'FABRIC' as const, loaderVersion: '0.0.1' }, 'LOADER_VERSION_NOT_AVAILABLE'],
+    ['a modpack build for another game version', { minecraftVersion: '1.21.11', software: 'FABRIC' as const, modpack: { source: 'MODRINTH' as const, projectId: MODPACK_FIXTURE.projectId, versionId: MODPACK_FIXTURE.versionId } }, 'MODPACK_NOT_AVAILABLE'],
+    ['a modpack build that does not exist', { minecraftVersion: '1.21.1', software: 'FABRIC' as const, modpack: { source: 'MODRINTH' as const, projectId: 'AbCd1234', versionId: 'Missing1' } }, 'MODPACK_NOT_AVAILABLE'],
+  ])('rejects %s with 422 (checked against the catalog)', async (_, overrides, code) => {
+    const owner = await newUser();
+    const res = await http().post('/servers').set(owner.auth).send(validBody(overrides)).expect(422);
+    expect(res.body.error.code).toBe(code);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  it('accepts a modpack whose build matches version and loader', async () => {
+    const owner = await newUser();
+    const modpack = { source: 'MODRINTH' as const, projectId: MODPACK_FIXTURE.projectId, versionId: MODPACK_FIXTURE.versionId };
+    await http().post('/servers').set(owner.auth).send(validBody({ minecraftVersion: '1.21.1', software: 'FABRIC', loaderVersion: '0.19.5', modpack })).expect(202);
   });
 
   it('rejects a malformed Idempotency-Key', async () => {

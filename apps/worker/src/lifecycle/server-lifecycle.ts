@@ -110,6 +110,7 @@ export class ServerLifecycle {
 
       const { containerId } = await this.d.runtime.create(spec);
       await this.d.repo.setContainerId(server.id, containerId);
+      await this.d.repo.markConfigApplied(server.id, server.configRevision);
       await this.d.repo.recordStage(server.id, operationId, 'PROVISION_CONTAINER_CREATED');
       checkpoint(signal);
 
@@ -188,7 +189,11 @@ export class ServerLifecycle {
   /** Volume, network, image and container all exist and match the current spec. */
   private async ensureContainer(server: WorkerServer, spec: ServerRuntimeSpec, signal: AbortSignal) {
     const observed = await this.d.runtime.inspect(server.id);
-    if (observed.exists && observed.specHash === this.d.runtime.hashOf(spec)) return;
+    if (observed.exists && observed.specHash === this.d.runtime.hashOf(spec)) {
+      await this.d.repo.markConfigApplied(server.id, server.configRevision);
+      return;
+    }
+    if (server.nodeId) await this.d.repo.assertCapacity({ id: server.id, heapMb: server.heapMb, nodeId: server.nodeId }, this.d.node.safeRatio);
     if (observed.exists) {
       // Settings or runtime changed while stopped: recreate. Data lives in the volume, untouched.
       await this.d.runtime.stop(server.id, { timeoutSec: spec.stopTimeoutSec });
@@ -200,6 +205,7 @@ export class ServerLifecycle {
     checkpoint(signal);
     const { containerId } = await this.d.runtime.create(spec);
     await this.d.repo.setContainerId(server.id, containerId);
+    await this.d.repo.markConfigApplied(server.id, server.configRevision);
   }
 
   /** Bounded wait: healthy → done; exited → ContainerExitedError; deadline → StartTimeoutError. */
